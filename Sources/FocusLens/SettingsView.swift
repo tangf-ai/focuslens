@@ -57,7 +57,7 @@ struct SettingsWorkspace: View {
                 }
                 Text("记录和复盘保存在这台 Mac，密钥单独存入系统钥匙串。退出后计时会根据实际时间恢复；关闭应用或电脑睡眠期间，未暂停的时间仍会计入。离开工作前请先暂停。")
                     .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5).fixedSize(horizontal: false, vertical: true)
-                Text("专注镜 0.1.3 · 独立开发的专注工具").font(.system(size: 10)).foregroundStyle(Theme.muted).padding(.top, 8)
+                Text("专注镜 0.1.4 · 独立开发的专注工具").font(.system(size: 10)).foregroundStyle(Theme.muted).padding(.top, 8)
             }.padding(35).padding(.top, 10)
         }
         .onAppear {
