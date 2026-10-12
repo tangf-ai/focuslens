@@ -1,0 +1,19 @@
+# Swift build and local IDE state
+.build/
+.swiftpm/
+.DS_Store
+
+# Generated app bundles and packages
+*.app/
+*.zip
+*.dmg
+*.pkg
+.artifacts/
+
+# Local configuration, credentials and runtime records
+.env
+.env.*
+!.env.example
+focus-data.json
+*-export.json
+*.log
