@@ -73,7 +73,7 @@ struct AIService {
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
         let records: [[String: Any]] = sessions.sorted { $0.startedAt < $1.startedAt }.map {
             var row: [String: Any] = ["开始时间": formatter.string(from: $0.startedAt),
-                "目标": String($0.goal.prefix(240)), "任务类型": $0.kind.rawValue,
+                "目标": String($0.goal.prefix(240)), "任务类型": $0.kind.displayName,
                 "专注秒数": Int($0.focusSeconds), "计划秒数": Int($0.plannedSeconds),
                 "中断次数": $0.interruptions, "目标完成情况": $0.outcome.rawValue,
                 "反馈": String($0.note.prefix(400))]

@@ -10,6 +10,7 @@ struct SettingsWorkspace: View {
     @State private var replaceKey = false
     @State private var saved = false
     @State private var confirmDeleteKey = false
+    @State private var tagManagerOpen = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
@@ -22,6 +23,16 @@ struct SettingsWorkspace: View {
                 }
                 Text("开始后自动显示可拖动的置顶倒计时浮窗，关闭浮窗不会结束计时。专注模式会放大计时器并进入全屏，计时结束后退出由应用开启的全屏。休息需手动开始；应用不修改系统勿扰或通知设置，也不播放提示音。")
                     .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5).fixedSize(horizontal: false, vertical: true)
+                Rectangle().fill(Theme.line).frame(height: 1)
+                HStack {
+                    VStack(alignment: .leading, spacing: 7) {
+                        sectionTitle("专注标签", symbol: "tag")
+                        Text("\(store.data.taskKinds.count) 个标签，可新增、改名和删除。")
+                            .font(.system(size: 11)).foregroundStyle(Theme.muted)
+                    }
+                    Spacer()
+                    Button("管理标签") { tagManagerOpen = true }.buttonStyle(QuietButtonStyle())
+                }
                 Rectangle().fill(Theme.line).frame(height: 1)
                 sectionTitle("AI 接口", symbol: "sparkles")
                 VStack(alignment: .leading, spacing: 19) {
@@ -57,9 +68,10 @@ struct SettingsWorkspace: View {
                 }
                 Text("记录和复盘保存在这台 Mac，密钥单独存入系统钥匙串。退出后计时会根据实际时间恢复；关闭应用或电脑睡眠期间，未暂停的时间仍会计入。离开工作前请先暂停。")
                     .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5).fixedSize(horizontal: false, vertical: true)
-                Text("专注镜 0.1.4 · 独立开发的专注工具").font(.system(size: 10)).foregroundStyle(Theme.muted).padding(.top, 8)
-            }.padding(35).padding(.top, 10)
+                Text("专注镜 0.1.5 · 独立开发的专注工具").font(.system(size: 10)).foregroundStyle(Theme.muted).padding(.top, 8)
+            }.padding(24).padding(.top, 4)
         }
+        .sheet(isPresented: $tagManagerOpen) { TagManagerView().environmentObject(store) }
         .onAppear {
             focus = store.data.focusMinutes
             rest = store.data.restMinutes

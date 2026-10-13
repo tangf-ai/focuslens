@@ -15,12 +15,12 @@ struct FocusLensApp: App {
     }
     var body: some Scene {
         WindowGroup("专注镜", id: "main") {
-            RootView().environmentObject(store).frame(minWidth: 1000, minHeight: 720)
+            RootView().environmentObject(store).frame(minWidth: 860, minHeight: 620)
                 .preferredColorScheme(.light)
                 .tint(Theme.accent)
                 .environment(\.locale, Locale(identifier: "zh_CN"))
         }
-        .defaultSize(width: 1120, height: 790)
+        .defaultSize(width: 960, height: 680)
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .commands {
@@ -86,6 +86,7 @@ struct RootView: View {
             let opener = openWindow
             store.openMainWindowAction = { opener(id: "main") }
             store.enableFloatingTimer()
+            store.applyCompactMainWindow()
         }
         .foregroundStyle(Theme.ink)
         .animation(.easeInOut(duration: 0.2), value: store.focusMode)
@@ -99,30 +100,30 @@ struct RootView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "circle.lefthalf.filled").font(.system(size: 27, weight: .light)).foregroundStyle(Theme.accent)
+            HStack(spacing: 9) {
+                Image(systemName: "circle.lefthalf.filled").font(.system(size: 24, weight: .light)).foregroundStyle(Theme.accent)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("专注镜").font(.system(size: 23, weight: .semibold))
+                    Text("专注镜").font(.system(size: 21, weight: .semibold))
                     Text("FOCUS LENS").font(.system(size: 9, weight: .medium, design: .monospaced)).tracking(2.2).foregroundStyle(Theme.muted)
                 }
             }
-            .padding(.top, 48).padding(.bottom, 42)
+            .padding(.top, 32).padding(.bottom, 28)
             ForEach(Destination.allCases) { item in
                 Button {
                     selection = item
                 } label: {
                     HStack(spacing: 12) {
                         Image(systemName: item.symbol).font(.system(size: 15)).frame(width: 19)
-                        Text(item.rawValue).font(.system(size: 14, weight: selection == item ? .semibold : .regular))
+                        Text(item.rawValue).font(.system(size: 13, weight: selection == item ? .semibold : .regular))
                         Spacer()
                         if item == .timer, store.data.activeRun != nil { Circle().fill(Theme.accent).frame(width: 6, height: 6) }
                     }
                     .foregroundStyle(selection == item ? Theme.accent : Theme.muted)
-                    .padding(.horizontal, 14).padding(.vertical, 13)
+                    .padding(.horizontal, 12).padding(.vertical, 10)
                     .background(selection == item ? Theme.accent.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 8))
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).padding(.bottom, 5)
+                .buttonStyle(.plain).padding(.bottom, 3)
             }
             Spacer()
             VStack(alignment: .leading, spacing: 9) {
@@ -135,7 +136,7 @@ struct RootView: View {
             Text("记录保存在这台 Mac 上").font(.system(size: 10)).foregroundStyle(Theme.muted).padding(.top, 17).padding(.bottom, 25).padding(.leading, 14)
         }
         .foregroundStyle(Theme.ink)
-        .padding(.horizontal, 19).frame(width: 208).background(Theme.sidebar)
+        .padding(.horizontal, 14).frame(width: 180).background(Theme.sidebar)
     }
 }
 
@@ -143,8 +144,8 @@ struct PageTitle: View {
     let title: String
     let subtitle: String
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text(title).font(.system(size: 29, weight: .semibold))
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.system(size: 25, weight: .semibold))
             Text(subtitle).font(.system(size: 12)).foregroundStyle(Theme.muted)
         }
     }
@@ -175,7 +176,7 @@ struct Metric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(label).font(.system(size: 12)).foregroundStyle(Theme.muted)
-            Text(value).font(.system(size: 29, weight: .medium, design: .rounded)).monospacedDigit()
+            Text(value).font(.system(size: 26, weight: .medium, design: .rounded)).monospacedDigit()
             if let hint { Text(hint).font(.system(size: 10)).foregroundStyle(Theme.muted) }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }

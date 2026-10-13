@@ -22,7 +22,7 @@ struct InsightsView: View {
     }
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
+            VStack(alignment: .leading, spacing: 24) {
                 PageTitle(title: "本周统计", subtitle: "\(interval.start.formatted(.dateTime.locale(Locale(identifier: "zh_CN")).month().day())) — \(interval.end.addingTimeInterval(-1).formatted(.dateTime.locale(Locale(identifier: "zh_CN")).month().day())) · 周一至周日")
                 HStack(alignment: .top, spacing: 24) {
                     Metric(label: "专注时间", value: String(format: "%.0f 分", stats.totalSeconds / 60), hint: "\(stats.sessions.count) 轮已记录")
@@ -52,20 +52,20 @@ struct InsightsView: View {
                         }
                     }
                     .chartYAxis { AxisMarks(position: .leading) { _ in AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [3, 4])); AxisValueLabel() } }
-                    .frame(height: 215)
+                    .frame(height: 190)
                     Text("按每轮开始日期归属；跨日专注全部计入开始日。暂停、休息及正在进行的轮次不计入。").font(.system(size: 10)).foregroundStyle(Theme.muted)
                 }
                 Rectangle().fill(Theme.line).frame(height: 1)
-                HStack(alignment: .top, spacing: 45) {
+                HStack(alignment: .top, spacing: 30) {
                     VStack(alignment: .leading, spacing: 20) {
-                        Text("任务类型").font(.system(size: 15, weight: .semibold))
+                        Text("标签分布").font(.system(size: 15, weight: .semibold))
                         if stats.sessions.isEmpty { Text("完成专注后显示分布").font(.system(size: 12)).foregroundStyle(Theme.muted) }
-                        ForEach(TaskKind.allCases.filter { kind in stats.sessions.contains { $0.kind == kind } }) { kind in
+                        ForEach(Array(Set(stats.sessions.map(\.kind))).sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }) { kind in
                             let matching = stats.sessions.filter { $0.kind == kind }
                             let total = FocusStats(sessions: matching).totalSeconds
                             VStack(spacing: 8) {
                                 HStack {
-                                    Text(kind.rawValue)
+                                    Text(kind.displayName)
                                     Spacer()
                                     Text("\(durationText(total)) · \(matching.count) 轮").foregroundStyle(Theme.muted)
                                 }.font(.system(size: 11))
@@ -85,7 +85,7 @@ struct InsightsView: View {
                             .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
-            }.padding(35).padding(.top, 10)
+            }.padding(24).padding(.top, 4)
         }
     }
 }
@@ -97,7 +97,7 @@ struct HistoryView: View {
     @State private var deleteID: UUID?
     private var filtered: [FocusSession] {
         let sessions = range == "全部" ? store.data.sessions : sessionsIn(store.data.sessions, interval: (range == "今天" ? Period.today : .week).interval(now: store.now))
-        return sessions.filter { query.isEmpty || goalDisplayText($0.goal).localizedCaseInsensitiveContains(query) || $0.note.localizedCaseInsensitiveContains(query) }
+        return sessions.filter { query.isEmpty || goalDisplayText($0.goal).localizedCaseInsensitiveContains(query) || $0.note.localizedCaseInsensitiveContains(query) || $0.kind.displayName.localizedCaseInsensitiveContains(query) }
             .sorted { $0.startedAt > $1.startedAt }
     }
     var body: some View {
@@ -113,7 +113,7 @@ struct HistoryView: View {
                 Spacer()
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(Theme.muted)
-                    TextField("搜索目标或反馈", text: $query).textFieldStyle(.plain)
+                    TextField("搜索目标、标签或反馈", text: $query).textFieldStyle(.plain)
                 }.padding(9).frame(width: 230).background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 7))
             }
             if filtered.isEmpty {
@@ -142,7 +142,7 @@ struct HistoryView: View {
                                 HStack(spacing: 15) {
                                     VStack(alignment: .leading, spacing: 6) {
                                         Text(goalDisplayText(session.goal)).font(.system(size: 14, weight: .medium)).lineLimit(2)
-                                        Text("\(session.startedAt.formatted(.dateTime.locale(Locale(identifier: "zh_CN")).month().day().hour().minute())) · \(session.kind.rawValue)")
+                                        Text("\(session.startedAt.formatted(.dateTime.locale(Locale(identifier: "zh_CN")).month().day().hour().minute())) · \(session.kind.displayName)")
                                             .font(.system(size: 10)).foregroundStyle(Theme.muted)
                                     }.frame(maxWidth: .infinity, alignment: .leading)
                                     Text(durationText(session.focusSeconds)).font(.system(size: 12, design: .rounded)).frame(width: 100, alignment: .trailing)
@@ -154,7 +154,7 @@ struct HistoryView: View {
                     }
                 }
             }
-        }.padding(35).padding(.top, 10)
+        }.padding(24).padding(.top, 4)
         .confirmationDialog("删除这条专注记录？", isPresented: Binding(get: { deleteID != nil }, set: { if !$0 { deleteID = nil } }), titleVisibility: .visible) {
             Button("删除记录", role: .destructive) { if let deleteID { store.deleteSession(deleteID) }; deleteID = nil }
             Button("取消", role: .cancel) { deleteID = nil }
@@ -171,7 +171,7 @@ struct ReviewView: View {
     private var interval: DateInterval { period.interval(now: store.now) }
     private var sessions: [FocusSession] { sessionsIn(store.data.sessions, interval: interval) }
     private var report: Review? { store.data.reviews.first { $0.start == interval.start && $0.end == interval.end } }
-    private var stale: Bool { guard let report else { return false }; return Set(report.sessionIDs) != Set(sessions.map(\.id)) }
+    private var stale: Bool { guard let report else { return false }; return report.isStale == true || Set(report.sessionIDs) != Set(sessions.map(\.id)) }
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
             HStack(alignment: .top) {
@@ -238,7 +238,7 @@ struct ReviewView: View {
             } else {
                 EmptyState(symbol: "sparkles", title: sessions.isEmpty ? "先积累一轮专注" : "记录已经准备好", detail: sessions.isEmpty ? "完成专注并保存反馈后，就可以生成复盘。\n数据较少时，AI 会只做初步观察。" : "配置 AI 接口后，点击生成复盘。\n分析以记录为依据，不会把时长直接当作效率。")
             }
-        }.padding(35).padding(.top, 10)
+        }.padding(24).padding(.top, 4)
         .onChange(of: period) { _, _ in copied = false }
         .onChange(of: report?.id) { _, _ in copied = false }
         .sheet(item: $archivedReport) { review in

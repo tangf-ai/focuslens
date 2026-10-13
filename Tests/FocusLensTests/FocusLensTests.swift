@@ -195,6 +195,96 @@ final class FocusLensTests {
         XCTAssertFalse(store.hasScheduledCompletion)
     }
 
+    @MainActor func testLegacyDataMigrationBacksUpAndPreservesRecords() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var data = AppData()
+        var record = makeSession(outcome: .completed, rating: 4)
+        record.kind = .learning
+        data.sessions = [record]
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(data)) as? [String: Any])
+        legacy["schemaVersion"] = 1
+        legacy.removeValue(forKey: "taskKinds")
+        legacy.removeValue(forKey: "selectedKind")
+        let original = try JSONSerialization.data(withJSONObject: legacy)
+        let file = directory.appendingPathComponent("focus-data.json")
+        try original.write(to: file)
+        let store = FocusStore(directory: directory, startClock: false)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertEqual(store.data.schemaVersion, 2)
+        XCTAssertEqual(store.data.sessions, [record])
+        XCTAssertEqual(store.data.taskKinds, TaskKind.allCases)
+        XCTAssertEqual(try Data(contentsOf: file), original)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("focus-data-before-v2.json")), original)
+        try store.addKind("研究")
+        let reopened = FocusStore(directory: directory, startClock: false)
+        XCTAssertEqual(reopened.data.sessions, [record])
+        XCTAssertTrue(reopened.data.taskKinds.contains(TaskKind(rawValue: "研究")))
+    }
+
+    @MainActor func testCustomTagRenameDeleteKeepsHistoryAndMarksReviewStale() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FocusStore(directory: directory, startClock: false)
+        let kind = try store.addKind(" 研究 ")
+        XCTAssertEqual(kind.rawValue, "研究")
+        store.start(goal: "阅读论文", kind: kind, minutes: 25, at: origin)
+        store.finish(at: origin.addingTimeInterval(120))
+        store.saveFeedback(outcome: .partial, rating: 4, note: "完成第一部分")
+        let original = try XCTUnwrap(store.data.sessions.first)
+        store.data.reviews = [Review(createdAt: origin, start: origin, end: origin.addingTimeInterval(86400), sessionIDs: [original.id], content: "原复盘", model: "test"),
+                              Review(createdAt: origin, start: origin, end: origin.addingTimeInterval(86400), sessionIDs: [UUID()], content: "其他记录", model: "test")]
+        try store.renameKind(kind, to: "论文")
+        let renamed = TaskKind(rawValue: "论文")
+        XCTAssertEqual(store.data.selectedKind, renamed)
+        XCTAssertEqual(store.data.sessions.first?.id, original.id)
+        XCTAssertEqual(store.data.sessions.first?.focusSeconds, 120)
+        XCTAssertEqual(store.data.sessions.first?.rating, 4)
+        XCTAssertEqual(store.data.sessions.first?.note, "完成第一部分")
+        XCTAssertEqual(store.data.sessions.first?.kind, renamed)
+        XCTAssertEqual(store.data.reviews[0].isStale, true)
+        XCTAssertNil(store.data.reviews[1].isStale)
+        try store.deleteKind(renamed)
+        XCTAssertFalse(store.data.taskKinds.contains(renamed))
+        XCTAssertEqual(store.data.selectedKind, .uncategorized)
+        let reopened = FocusStore(directory: directory, startClock: false)
+        XCTAssertEqual(reopened.data.sessions.first?.kind, renamed)
+        XCTAssertEqual(FocusStats(sessions: reopened.data.sessions).totalSeconds, 120)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(reopened.data.sessions[0])) as? [String: Any])
+        XCTAssertEqual(object["kind"] as? String, "论文")
+    }
+
+    @MainActor func testTagValidationRejectsDuplicatesWithoutWriting() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FocusStore(directory: directory, startClock: false)
+        let kind = try store.addKind(" Qwen ")
+        let file = directory.appendingPathComponent("focus-data.json")
+        let before = try Data(contentsOf: file)
+        XCTAssertThrowsError(try store.addKind("qwen"))
+        XCTAssertThrowsError(try store.addKind("ｑｗｅｎ"))
+        XCTAssertThrowsError(try store.addKind(" "))
+        XCTAssertThrowsError(try store.addKind("无标签"))
+        XCTAssertThrowsError(try store.addKind(String(repeating: "长", count: 21)))
+        XCTAssertThrowsError(try store.renameKind(kind, to: "学习"))
+        XCTAssertEqual(try Data(contentsOf: file), before)
+        XCTAssertEqual(store.data.selectedKind, kind)
+    }
+
+    @MainActor func testDeletingAllTagsPersistsAndAllowsUntaggedFocus() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FocusStore(directory: directory, startClock: false)
+        for kind in Array(store.data.taskKinds) { try store.deleteKind(kind) }
+        let reopened = FocusStore(directory: directory, startClock: false)
+        XCTAssertEqual(reopened.data.taskKinds.count, 0)
+        XCTAssertEqual(reopened.data.selectedKind, .uncategorized)
+        reopened.start(goal: "", kind: .uncategorized, minutes: 1)
+        XCTAssertEqual(reopened.data.activeRun?.kind, .uncategorized)
+        XCTAssertEqual(reopened.data.activeRun?.kind.displayName, "无标签")
+    }
+
     private func makeSession(outcome: Outcome = .completed, rating: Int? = nil) -> FocusSession {
         FocusSession(goal: "测试目标", kind: .development, startedAt: origin, endedAt: origin.addingTimeInterval(1500),
                      focusSeconds: 1500, plannedSeconds: 1500, interruptions: 0, outcome: outcome, rating: rating, note: "")

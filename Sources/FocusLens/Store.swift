@@ -104,12 +104,20 @@ final class FocusStore: ObservableObject {
     func load() {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
         do {
-            let loaded = try JSONDecoder().decode(AppData.self, from: Data(contentsOf: fileURL))
-            guard loaded.schemaVersion == 1 else { throw StoreError.unsupportedVersion }
+            let original = try Data(contentsOf: fileURL)
+            var loaded = try JSONDecoder().decode(AppData.self, from: original)
+            guard (1...2).contains(loaded.schemaVersion) else { throw StoreError.unsupportedVersion }
+            if loaded.schemaVersion == 1 {
+                let backup = directory.appendingPathComponent("focus-data-before-v2.json")
+                if !FileManager.default.fileExists(atPath: backup.path) {
+                    try original.write(to: backup, options: .atomic)
+                }
+                loaded.schemaVersion = 2
+            }
             data = loaded
         } catch {
             loadingFailed = true
-            errorMessage = "本地记录读取失败，已停止写入以保护原文件。请在设置中打开数据文件夹，备份后检查 focus-data.json。\n\(error.localizedDescription)"
+            errorMessage = "本地记录读取或升级失败，已停止写入以保护原文件。请在设置中打开数据文件夹，备份后检查 focus-data.json。\n\(error.localizedDescription)"
         }
     }
 
@@ -176,6 +184,74 @@ final class FocusStore: ObservableObject {
         persist()
     }
 
+    func selectKind(_ kind: TaskKind) {
+        guard !loadingFailed, kind == .uncategorized || data.taskKinds.contains(kind), data.selectedKind != kind else { return }
+        var updated = data
+        updated.selectedKind = kind
+        try? saveTagChange(updated)
+    }
+
+    @discardableResult
+    func addKind(_ name: String) throws -> TaskKind {
+        let kind = try validatedKind(name)
+        var updated = data
+        updated.taskKinds.append(kind)
+        updated.selectedKind = kind
+        try saveTagChange(updated)
+        return kind
+    }
+
+    func renameKind(_ old: TaskKind, to name: String) throws {
+        guard data.taskKinds.contains(old) else { throw TagError.missing }
+        let replacement = try validatedKind(name, excluding: old)
+        guard replacement != old else { return }
+        var updated = data
+        updated.taskKinds = updated.taskKinds.map { $0 == old ? replacement : $0 }
+        if updated.selectedKind == old { updated.selectedKind = replacement }
+        if updated.activeRun?.kind == old { updated.activeRun?.kind = replacement }
+        if updated.pendingFeedback?.kind == old { updated.pendingFeedback?.kind = replacement }
+        let changedIDs = Set(updated.sessions.filter { $0.kind == old }.map(\.id))
+        for index in updated.sessions.indices where updated.sessions[index].kind == old {
+            updated.sessions[index].kind = replacement
+        }
+        for index in updated.reviews.indices where !changedIDs.isDisjoint(with: updated.reviews[index].sessionIDs) {
+            updated.reviews[index].isStale = true
+        }
+        try saveTagChange(updated)
+    }
+
+    func deleteKind(_ kind: TaskKind) throws {
+        guard data.taskKinds.contains(kind) else { throw TagError.missing }
+        var updated = data
+        updated.taskKinds.removeAll { $0 == kind }
+        if updated.selectedKind == kind { updated.selectedKind = .uncategorized }
+        try saveTagChange(updated)
+    }
+
+    private func validatedKind(_ input: String, excluding: TaskKind? = nil) throws -> TaskKind {
+        let name = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 20, name.rangeOfCharacter(from: .controlCharacters) == nil else { throw TagError.invalidName }
+        guard name != "无标签" else { throw TagError.reservedName }
+        guard !data.taskKinds.contains(where: { $0 != excluding && $0.rawValue.compare(name, options: [.caseInsensitive, .widthInsensitive]) == .orderedSame }) else { throw TagError.duplicate }
+        return TaskKind(rawValue: name)
+    }
+
+    private func saveTagChange(_ updated: AppData) throws {
+        guard !loadingFailed else { throw TagError.cannotSave }
+        let previous = data
+        data = updated
+        guard persist() else { data = previous; throw TagError.cannotSave }
+    }
+
+    func applyCompactMainWindow() {
+        guard !UserDefaults.standard.bool(forKey: "FocusLensCompactLayoutV1") else { return }
+        DispatchQueue.main.async {
+            guard let window = NSApp.windows.first(where: { $0.identifier != FloatingTimerController.identifier && $0.canBecomeMain && !$0.styleMask.contains(.fullScreen) }) else { return }
+            window.setContentSize(NSSize(width: 960, height: 680))
+            UserDefaults.standard.set(true, forKey: "FocusLensCompactLayoutV1")
+        }
+    }
+
     func updateDurations(focus: Int, rest: Int) {
         data.focusMinutes = min(180, max(1, focus))
         data.restMinutes = min(60, max(1, rest))
@@ -235,7 +311,8 @@ final class FocusStore: ObservableObject {
                 let content = try await AIService.generate(settings: settings, key: key, sessions: sessions, interval: interval)
                 try Task.checkCancellation()
                 self.data.reviews.insert(Review(createdAt: Date(), start: interval.start, end: interval.end,
-                    sessionIDs: sessions.map(\.id), content: content, model: settings.model), at: 0)
+                    sessionIDs: sessions.map(\.id), content: content, model: settings.model,
+                    isStale: sessionsIn(self.data.sessions, interval: interval) != sessions), at: 0)
                 self.data.reviews = Array(self.data.reviews.prefix(50))
                 self.persist()
             } catch is CancellationError {
@@ -289,4 +366,17 @@ final class FocusStore: ObservableObject {
 enum StoreError: LocalizedError {
     case unsupportedVersion
     var errorDescription: String? { "此数据由更高版本创建，请使用匹配版本打开。" }
+}
+
+enum TagError: LocalizedError {
+    case invalidName, duplicate, reservedName, missing, cannotSave
+    var errorDescription: String? {
+        switch self {
+        case .invalidName: "标签名称需要 1–20 个字符，且不能包含换行。"
+        case .duplicate: "已存在同名标签，请换一个名称。"
+        case .reservedName: "“无标签”是默认选项，请使用其他名称。"
+        case .missing: "这个标签已不存在，请重新选择。"
+        case .cannotSave: "标签未能保存，请先处理本地记录文件的保存问题。"
+        }
+    }
 }

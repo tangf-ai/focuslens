@@ -3,7 +3,7 @@ import SwiftUI
 struct TimerWorkspace: View {
     @EnvironmentObject private var store: FocusStore
     @State private var goal = ""
-    @State private var kind: TaskKind = .development
+    @State private var tagManagerOpen = false
     @State private var minutes = 25
     @State private var confirmEnd = false
     private var run: TimerRun? { store.data.activeRun }
@@ -23,42 +23,43 @@ struct TimerWorkspace: View {
                     }.buttonStyle(QuietButtonStyle())
                 }
             }
-            .padding(.bottom, store.focusMode ? 0 : 24)
+            .padding(.bottom, store.focusMode ? 0 : 16)
             if store.focusMode {
                 focusedTimer.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                HStack(alignment: .top, spacing: 30) {
+                HStack(alignment: .top, spacing: 22) {
                     VStack(spacing: 0) {
                         HStack(spacing: 7) {
                             Circle().fill(run == nil ? Theme.line : Theme.accent).frame(width: 6, height: 6)
                             Text(run == nil ? "准备开始" : (run!.isPaused ? "已暂停 · 暂停时间不计入专注" : (isRest ? "休息中" : "正在专注")))
                                 .font(.system(size: 12)).foregroundStyle(Theme.muted)
-                        }.padding(.top, 18).padding(.bottom, 24)
-                        timerFace(size: 280, textSize: 65)
-                        if run == nil { setup.padding(.top, 25) }
+                        }.padding(.top, 8).padding(.bottom, 16)
+                        timerFace(size: 230, textSize: 58)
+                        if run == nil { setup.padding(.top, 18) }
                         else {
                             VStack(spacing: 8) {
                                 Text(isRest ? "让注意力休息一下" : goalDisplayText(run!.goal)).font(.system(size: 17, weight: .medium)).lineLimit(3).multilineTextAlignment(.center)
-                                Text(isRest ? "结束后手动开始下一轮" : "\(run!.kind.rawValue) · 计划 \(Int(run!.plannedSeconds / 60)) 分钟 · 中断 \(run!.interruptions) 次")
+                                Text(isRest ? "结束后手动开始下一轮" : "\(run!.kind.displayName) · 计划 \(Int(run!.plannedSeconds / 60)) 分钟 · 中断 \(run!.interruptions) 次")
                                     .font(.system(size: 11)).foregroundStyle(Theme.muted)
-                            }.frame(minHeight: 80).padding(.top, 20)
+                            }.frame(minHeight: 64).padding(.top, 12)
                         }
-                        controls.padding(.top, 25)
+                        controls.padding(.top, 16)
                         if run == nil {
                             Button { store.start(goal: "休息", kind: .other, minutes: store.data.restMinutes, phase: .rest) } label: {
                                 Text("先休息 \(store.data.restMinutes) 分钟").font(.system(size: 11)).foregroundStyle(Theme.muted)
-                            }.buttonStyle(.plain).padding(.top, 16)
+                            }.buttonStyle(.plain).padding(.top, 12)
                         }
                         Spacer(minLength: 16)
                     }.frame(maxWidth: .infinity)
                     Rectangle().fill(Theme.line).frame(width: 1)
-                    context.frame(width: 195)
+                    context.frame(width: 168)
                 }
                 .frame(maxHeight: .infinity)
             }
         }
-        .padding(.horizontal, 35).padding(.top, 45).padding(.bottom, 25)
+        .padding(.horizontal, 24).padding(.top, 28).padding(.bottom, 20)
         .onAppear { if run == nil { minutes = store.data.focusMinutes } }
+        .sheet(isPresented: $tagManagerOpen) { TagManagerView().environmentObject(store) }
         .confirmationDialog("提前结束这一轮？", isPresented: $confirmEnd, titleVisibility: .visible) {
             Button("结束并填写反馈") { store.finish() }
             Button("继续专注", role: .cancel) { }
@@ -70,25 +71,28 @@ struct TimerWorkspace: View {
     }
 
     private var setup: some View {
-        VStack(alignment: .leading, spacing: 13) {
+        VStack(alignment: .leading, spacing: 10) {
             TextField("这一轮，准备完成什么？（选填）", text: $goal, axis: .vertical)
-                .textFieldStyle(.plain).font(.system(size: 15)).lineLimit(1...2)
-                .padding(13).background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 8))
+                .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(1...2)
+                .padding(11).background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line, lineWidth: 1))
                 .onChange(of: goal) { _, value in if value.count > 500 { goal = String(value.prefix(500)) } }
                 .accessibilityLabel("本轮目标（选填）")
             HStack {
-                Picker("任务类型", selection: $kind) {
-                    ForEach(TaskKind.allCases) { Text($0.rawValue).tag($0) }
-                }.labelsHidden().frame(width: 110)
+                Picker("标签", selection: Binding(get: { store.data.selectedKind }, set: { store.selectKind($0) })) {
+                    Text("无标签").tag(TaskKind.uncategorized)
+                    ForEach(store.data.taskKinds) { Text($0.displayName).tag($0) }
+                }.labelsHidden().frame(width: 105)
+                Button("管理标签") { tagManagerOpen = true }
+                    .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Theme.muted)
                 Spacer()
                 Picker("专注时长", selection: $minutes) {
                     ForEach(Array(Set([1, 15, 25, 45, 60, 90, store.data.focusMinutes])).sorted(), id: \.self) {
                         Text("\($0) 分钟").tag($0)
                     }
-                }.labelsHidden().frame(width: 115)
+                }.labelsHidden().frame(width: 105)
             }.font(.system(size: 12))
-        }.frame(maxWidth: 390)
+        }.frame(maxWidth: 340)
     }
 
     @ViewBuilder private var controls: some View {
@@ -102,7 +106,7 @@ struct TimerWorkspace: View {
                     if isRest { store.finish() } else { confirmEnd = true }
                 }.buttonStyle(QuietButtonStyle())
             } else {
-                Button { store.start(goal: goal, kind: kind, minutes: minutes) } label: {
+                Button { store.start(goal: goal, kind: store.data.selectedKind, minutes: minutes) } label: {
                     Label("开始专注", systemImage: "play.fill").frame(minWidth: 135)
                 }.buttonStyle(AccentButtonStyle())
             }
@@ -123,8 +127,8 @@ struct TimerWorkspace: View {
     private var context: some View {
         let stats = store.stats(.today)
         return VStack(alignment: .leading, spacing: 0) {
-            Text("今天的记录").font(.system(size: 13, weight: .semibold)).padding(.top, 20)
-            Text(durationText(stats.totalSeconds)).font(.system(size: 26, weight: .medium, design: .rounded)).padding(.top, 19)
+            Text("今天的记录").font(.system(size: 13, weight: .semibold)).padding(.top, 10)
+            Text(durationText(stats.totalSeconds)).font(.system(size: 26, weight: .medium, design: .rounded)).padding(.top, 14)
             Text("已专注 · 不含正在进行的一轮").font(.system(size: 10)).foregroundStyle(Theme.muted).padding(.top, 7)
             HStack {
                 VStack(alignment: .leading, spacing: 7) {
@@ -137,24 +141,21 @@ struct TimerWorkspace: View {
                     Text("目标完成").font(.system(size: 10)).foregroundStyle(Theme.muted)
                 }
                 Spacer()
-            }.padding(.vertical, 25)
+            }.padding(.vertical, 18)
             Rectangle().fill(Theme.line).frame(height: 1)
-            Text("最近专注").font(.system(size: 12, weight: .semibold)).padding(.top, 24).padding(.bottom, 19)
+            Text("最近专注").font(.system(size: 12, weight: .semibold)).padding(.top, 18).padding(.bottom, 14)
             if stats.sessions.isEmpty {
                 Text("完成第一轮后，\n这里会留下你的记录。").font(.system(size: 12)).foregroundStyle(Theme.muted).lineSpacing(6)
             } else {
                 ForEach(Array(stats.sessions.sorted { $0.startedAt > $1.startedAt }.prefix(3))) { session in
                     VStack(alignment: .leading, spacing: 7) {
                         Text(goalDisplayText(session.goal)).font(.system(size: 12, weight: .medium)).lineLimit(2)
-                        Text("\(durationText(session.focusSeconds)) · \(session.outcome.rawValue)")
+                        Text("\(session.kind.displayName) · \(durationText(session.focusSeconds)) · \(session.outcome.rawValue)")
                             .font(.system(size: 10)).foregroundStyle(Theme.muted)
-                    }.padding(.bottom, 20)
+                    }.padding(.bottom, 16)
                 }
             }
-            Spacer(minLength: 25)
-            Image(systemName: "sparkles").font(.system(size: 17, weight: .light)).foregroundStyle(Theme.accent).padding(.bottom, 12)
-            Text("用记录了解自己的节奏").font(.system(size: 12, weight: .medium))
-            Text("时长、完成情况和中断次数，\n一起构成每次复盘的依据。").font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5).padding(.top, 8)
+            Spacer(minLength: 15)
         }
     }
 }

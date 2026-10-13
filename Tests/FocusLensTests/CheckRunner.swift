@@ -44,7 +44,11 @@ struct CheckRunner {
             ("重启恢复到期记录", tests.testStoreRecoversExpiredTimerAndPersistsFeedback),
             ("提前结束及防止重叠", tests.testEarlyFinishPausedRunExcludesPauseAndPreventsOverlap),
             ("损坏文件保护", tests.testCorruptedFileIsNotOverwritten),
-            ("空目标启动及到期调度", tests.testCompletionTimerOnlyArmedWhileRunning)
+            ("空目标启动及到期调度", tests.testCompletionTimerOnlyArmedWhileRunning),
+            ("旧版数据备份及迁移", tests.testLegacyDataMigrationBacksUpAndPreservesRecords),
+            ("标签改名删除保留记录及复盘快照", tests.testCustomTagRenameDeleteKeepsHistoryAndMarksReviewStale),
+            ("标签重名校验及失败不写入", tests.testTagValidationRejectsDuplicatesWithoutWriting),
+            ("删除全部标签后无标签计时", tests.testDeletingAllTagsPersistsAndAllowsUntaggedFocus)
         ]
         for (name, check) in checks {
             let before = failureCount

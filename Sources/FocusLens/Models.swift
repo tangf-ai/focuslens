@@ -1,8 +1,24 @@
 import Foundation
 
-enum TaskKind: String, Codable, CaseIterable, Identifiable {
-    case development = "开发", writing = "写作", learning = "学习", planning = "规划", other = "其他"
+struct TaskKind: RawRepresentable, Codable, CaseIterable, Identifiable, Hashable {
+    var rawValue: String
     var id: String { rawValue }
+    var displayName: String { rawValue.isEmpty ? "无标签" : rawValue }
+    init(rawValue: String) { self.rawValue = rawValue }
+    static let development = TaskKind(rawValue: "开发")
+    static let writing = TaskKind(rawValue: "写作")
+    static let learning = TaskKind(rawValue: "学习")
+    static let planning = TaskKind(rawValue: "规划")
+    static let other = TaskKind(rawValue: "其他")
+    static let uncategorized = TaskKind(rawValue: "")
+    static let allCases: [TaskKind] = [.development, .writing, .learning, .planning, .other]
+    init(from decoder: Decoder) throws {
+        rawValue = try decoder.singleValueContainer().decode(String.self)
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 enum Outcome: String, Codable, CaseIterable, Identifiable {
@@ -105,10 +121,11 @@ struct Review: Codable, Identifiable {
     var sessionIDs: [UUID]
     var content: String
     var model: String
+    var isStale: Bool? = nil
 }
 
 struct AppData: Codable {
-    var schemaVersion = 1
+    var schemaVersion = 2
     var sessions: [FocusSession] = []
     var activeRun: TimerRun?
     var pendingFeedback: SessionDraft?
@@ -116,6 +133,27 @@ struct AppData: Codable {
     var restMinutes = 5
     var aiSettings = AISettings()
     var reviews: [Review] = []
+    var taskKinds = TaskKind.allCases
+    var selectedKind: TaskKind = .development
+
+    init() { }
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, sessions, activeRun, pendingFeedback, focusMinutes, restMinutes, aiSettings, reviews, taskKinds, selectedKind
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        sessions = try values.decodeIfPresent([FocusSession].self, forKey: .sessions) ?? []
+        activeRun = try values.decodeIfPresent(TimerRun.self, forKey: .activeRun)
+        pendingFeedback = try values.decodeIfPresent(SessionDraft.self, forKey: .pendingFeedback)
+        focusMinutes = try values.decodeIfPresent(Int.self, forKey: .focusMinutes) ?? 25
+        restMinutes = try values.decodeIfPresent(Int.self, forKey: .restMinutes) ?? 5
+        aiSettings = try values.decodeIfPresent(AISettings.self, forKey: .aiSettings) ?? AISettings()
+        reviews = try values.decodeIfPresent([Review].self, forKey: .reviews) ?? []
+        taskKinds = try values.decodeIfPresent([TaskKind].self, forKey: .taskKinds) ?? TaskKind.allCases
+        let saved = try values.decodeIfPresent(TaskKind.self, forKey: .selectedKind) ?? .development
+        selectedKind = taskKinds.contains(saved) ? saved : .uncategorized
+    }
 }
 
 struct FocusStats {
