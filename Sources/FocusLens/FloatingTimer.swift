@@ -44,13 +44,18 @@ final class FloatingTimerController: NSObject {
     private var panel: CountdownPanel?
     private let timeLabel = NSTextField(labelWithString: "25:00")
     private let statusLabel = NSTextField(labelWithString: "专注中")
+    private let goalLabel = NSTextField(labelWithString: "")
     private let pauseButton = NSButton()
     private let planLabel = NSTextField(labelWithString: "25 分钟")
     private let progressLabel = NSTextField(labelWithString: "剩余时间")
     private let percentLabel = NSTextField(labelWithString: "100%")
     private let progressRail = RemainingTimeRail()
     private let statusDot = NSView()
-    private let panelSize = NSSize(width: 320, height: 168)
+    private var goalRowHeight: CGFloat = 0
+    private var panelSize: NSSize { NSSize(width: 320, height: 168 + goalRowHeight) }
+    private var upperViews: [NSView] = []
+    private var focusKind: TaskKind?
+    private var focusGoal = ""
     private var observation: AnyCancellable?
     private var visibilityObserver: NSObjectProtocol?
     private var displayTimer: Timer?
@@ -84,6 +89,13 @@ final class FloatingTimerController: NSObject {
         let previousRun = currentRun
         currentRun = data.activeRun
         hasFeedback = data.pendingFeedback != nil
+        if let run = currentRun {
+            focusKind = run.phase == .focus ? run.kind : nil
+            focusGoal = run.phase == .focus ? run.goal : ""
+        } else {
+            focusKind = data.pendingFeedback?.kind
+            focusGoal = data.pendingFeedback?.goal ?? ""
+        }
         if let run = currentRun {
             if run.id != runID { dismissed = false }
             runID = run.id
@@ -135,6 +147,15 @@ final class FloatingTimerController: NSObject {
         statusLabel.frame = NSRect(x: 34, y: 137, width: 160, height: 18)
         statusLabel.font = .systemFont(ofSize: 11, weight: .medium)
         statusLabel.textColor = muted
+        statusLabel.maximumNumberOfLines = 1
+        statusLabel.cell?.lineBreakMode = .byTruncatingTail
+        goalLabel.frame = NSRect(x: 20, y: 65, width: 280, height: 22)
+        goalLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        goalLabel.textColor = ink
+        goalLabel.maximumNumberOfLines = 1
+        goalLabel.cell?.lineBreakMode = .byTruncatingTail
+        goalLabel.isHidden = true
+        goalLabel.setAccessibilityLabel("本轮目标")
         planLabel.frame = NSRect(x: 202, y: 138, width: 76, height: 16)
         planLabel.font = .systemFont(ofSize: 10, weight: .regular)
         planLabel.textColor = muted
@@ -154,7 +175,7 @@ final class FloatingTimerController: NSObject {
         progressRail.setAccessibilityRole(.progressIndicator)
         progressRail.setAccessibilityLabel("剩余时间比例")
         progressRail.setAccessibilityValue(percentLabel.stringValue)
-        for view in [statusDot, statusLabel, planLabel, timeLabel, progressLabel, percentLabel, progressRail] {
+        for view in [statusDot, statusLabel, goalLabel, planLabel, timeLabel, progressLabel, percentLabel, progressRail] {
             content.addSubview(view)
         }
 
@@ -172,6 +193,7 @@ final class FloatingTimerController: NSObject {
                   frame: NSRect(x: 287, y: 136, width: 19, height: 19))
         closeButton.alphaValue = 0.6
         content.addSubview(closeButton)
+        upperViews = [statusDot, statusLabel, planLabel, timeLabel, pauseButton, openButton, closeButton]
 
         let restored = panel.setFrameUsingName("FocusLensFloatingTimer")
         if restored {
@@ -287,6 +309,29 @@ final class FloatingTimerController: NSObject {
             statusDot.layer?.backgroundColor = accent.cgColor
             pauseButton.isHidden = true
         }
+        if let kind = focusKind {
+            statusLabel.stringValue += " · \(kind.displayName)"
+        }
+        statusLabel.toolTip = statusLabel.stringValue
+        let goal = focusGoal.trimmingCharacters(in: .whitespacesAndNewlines)
+        goalLabel.stringValue = goal.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        goalLabel.toolTip = goal.isEmpty ? nil : goal
+        goalLabel.isHidden = goal.isEmpty
+        resizeForGoal(visible: !goal.isEmpty)
+    }
+
+    /// Only a state change relays out the panel; the per-second refresh stays text-only.
+    private func resizeForGoal(visible: Bool) {
+        guard let panel else { return }
+        let height: CGFloat = visible ? 32 : 0
+        guard height != goalRowHeight else { return }
+        let offset = height - goalRowHeight
+        goalRowHeight = height
+        let oldFrame = panel.frame
+        panel.setContentSize(panelSize)
+        for view in upperViews { view.frame.origin.y += offset }
+        let bottom = panel.screen?.visibleFrame.minY ?? oldFrame.minY
+        panel.setFrameOrigin(NSPoint(x: oldFrame.minX, y: max(bottom + 12, oldFrame.maxY - panelSize.height)))
     }
 
     @objc private func togglePause() { store?.togglePause() }
