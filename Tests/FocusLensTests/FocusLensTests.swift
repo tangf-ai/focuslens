@@ -104,8 +104,8 @@ final class FocusLensTests {
         store.start(goal: "测试", kind: .development, minutes: 1, at: origin)
         let restored = FocusStore(directory: directory, startClock: false)
         XCTAssertNil(restored.data.activeRun)
-        XCTAssertEqual(restored.data.pendingFeedback?.focusSeconds, 60)
-        XCTAssertEqual(restored.data.pendingFeedback?.endedAt, origin.addingTimeInterval(60))
+        XCTAssertEqual(restored.data.pendingFeedback?.focusSeconds, 300)
+        XCTAssertEqual(restored.data.pendingFeedback?.endedAt, origin.addingTimeInterval(300))
         restored.saveFeedback(outcome: .partial, rating: 4, note: "完成了第一部分")
         let reloaded = FocusStore(directory: directory, startClock: false)
         XCTAssertEqual(reloaded.data.sessions.count, 1)
@@ -283,6 +283,35 @@ final class FocusLensTests {
         reopened.start(goal: "", kind: .uncategorized, minutes: 1)
         XCTAssertEqual(reopened.data.activeRun?.kind, .uncategorized)
         XCTAssertEqual(reopened.data.activeRun?.kind.displayName, "无标签")
+    }
+
+    @MainActor func testFocusDurationBoundsAndSelectionPersistence() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FocusStore(directory: directory, startClock: false)
+        for minutes in [5, 10, 15, 20, 25, 30, 45, 60, 90, 180] {
+            store.updateDurations(focus: minutes, rest: 1)
+            let restored = FocusStore(directory: directory, startClock: false)
+            XCTAssertEqual(restored.data.focusMinutes, minutes)
+            restored.start(goal: "", kind: .learning, minutes: minutes)
+            XCTAssertEqual(restored.data.activeRun?.plannedSeconds, Double(minutes * 60))
+        }
+        store.updateDurations(focus: 1, rest: 1)
+        XCTAssertEqual(store.data.focusMinutes, 5)
+        store.start(goal: "", kind: .learning, minutes: -1)
+        XCTAssertEqual(store.data.activeRun?.plannedSeconds, 300)
+        store.finish()
+        store.saveFeedback(outcome: .completed, rating: nil, note: "")
+        store.updateDurations(focus: 500, rest: 1)
+        XCTAssertEqual(store.data.focusMinutes, 180)
+        store.start(goal: "休息", kind: .other, minutes: 1, phase: .rest)
+        XCTAssertEqual(store.data.activeRun?.plannedSeconds, 60)
+        // Loading a short legacy default changes only the next focus duration.
+        store.data.focusMinutes = 1
+        store.persist()
+        let reopened = FocusStore(directory: directory, startClock: false)
+        XCTAssertEqual(reopened.data.focusMinutes, 5)
+        XCTAssertEqual(reopened.data.activeRun?.plannedSeconds, 60)
     }
 
     private func makeSession(outcome: Outcome = .completed, rating: Int? = nil) -> FocusSession {

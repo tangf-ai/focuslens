@@ -11,13 +11,14 @@ struct SettingsWorkspace: View {
     @State private var saved = false
     @State private var confirmDeleteKey = false
     @State private var tagManagerOpen = false
+    private var appVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版" }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 PageTitle(title: "设置", subtitle: "调整专注周期，连接你使用的 AI 服务")
                 sectionTitle("专注与休息", symbol: "timer")
                 HStack(spacing: 35) {
-                    durationField("默认专注", value: $focus, range: 1...180)
+                    durationField("默认专注", value: $focus, range: 5...180)
                     durationField("默认休息", value: $rest, range: 1...60)
                     Spacer()
                 }
@@ -68,7 +69,7 @@ struct SettingsWorkspace: View {
                 }
                 Text("记录和复盘保存在这台 Mac，密钥单独存入系统钥匙串。退出后计时会根据实际时间恢复；关闭应用或电脑睡眠期间，未暂停的时间仍会计入。离开工作前请先暂停。")
                     .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5).fixedSize(horizontal: false, vertical: true)
-                Text("专注镜 0.1.5 · 独立开发的专注工具").font(.system(size: 10)).foregroundStyle(Theme.muted).padding(.top, 8)
+                Text("专注镜 \(appVersion) · 独立开发的专注工具").font(.system(size: 10)).foregroundStyle(Theme.muted).padding(.top, 8)
             }.padding(24).padding(.top, 4)
         }
         .sheet(isPresented: $tagManagerOpen) { TagManagerView().environmentObject(store) }

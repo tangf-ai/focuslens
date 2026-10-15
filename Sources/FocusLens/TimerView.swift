@@ -4,7 +4,7 @@ struct TimerWorkspace: View {
     @EnvironmentObject private var store: FocusStore
     @State private var goal = ""
     @State private var tagManagerOpen = false
-    @State private var minutes = 25
+    private var minutes: Int { store.data.focusMinutes }
     @State private var confirmEnd = false
     private var run: TimerRun? { store.data.activeRun }
     private var isRest: Bool { run?.phase == .rest }
@@ -58,7 +58,6 @@ struct TimerWorkspace: View {
             }
         }
         .padding(.horizontal, 24).padding(.top, 28).padding(.bottom, 20)
-        .onAppear { if run == nil { minutes = store.data.focusMinutes } }
         .sheet(isPresented: $tagManagerOpen) { TagManagerView().environmentObject(store) }
         .confirmationDialog("提前结束这一轮？", isPresented: $confirmEnd, titleVisibility: .visible) {
             Button("结束并填写反馈") { store.finish() }
@@ -86,8 +85,8 @@ struct TimerWorkspace: View {
                 Button("管理标签") { tagManagerOpen = true }
                     .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Theme.muted)
                 Spacer()
-                Picker("专注时长", selection: $minutes) {
-                    ForEach(Array(Set([1, 15, 25, 45, 60, 90, store.data.focusMinutes])).sorted(), id: \.self) {
+                Picker("专注时长", selection: Binding(get: { minutes }, set: { store.updateDurations(focus: $0, rest: store.data.restMinutes) })) {
+                    ForEach(Array(Set([5, 10, 15, 20, 25, 30, 45, 60, 90, minutes])).sorted(), id: \.self) {
                         Text("\($0) 分钟").tag($0)
                     }
                 }.labelsHidden().frame(width: 105)

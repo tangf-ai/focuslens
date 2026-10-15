@@ -114,6 +114,7 @@ final class FocusStore: ObservableObject {
                 }
                 loaded.schemaVersion = 2
             }
+            loaded.focusMinutes = min(180, max(5, loaded.focusMinutes))
             data = loaded
         } catch {
             loadingFailed = true
@@ -146,7 +147,7 @@ final class FocusStore: ObservableObject {
         guard !loadingFailed, data.activeRun == nil, data.pendingFeedback == nil else { return }
         let cleanGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         now = instant
-        data.activeRun = TimerRun(phase: phase, goal: cleanGoal, kind: kind, seconds: TimeInterval(max(1, min(180, minutes)) * 60), now: instant)
+        data.activeRun = TimerRun(phase: phase, goal: cleanGoal, kind: kind, seconds: TimeInterval(max(phase == .focus ? 5 : 1, min(180, minutes)) * 60), now: instant)
         armCompletionTimer()
         persist()
     }
@@ -253,7 +254,7 @@ final class FocusStore: ObservableObject {
     }
 
     func updateDurations(focus: Int, rest: Int) {
-        data.focusMinutes = min(180, max(1, focus))
+        data.focusMinutes = min(180, max(5, focus))
         data.restMinutes = min(60, max(1, rest))
         persist()
     }

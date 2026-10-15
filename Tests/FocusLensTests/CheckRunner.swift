@@ -48,7 +48,8 @@ struct CheckRunner {
             ("旧版数据备份及迁移", tests.testLegacyDataMigrationBacksUpAndPreservesRecords),
             ("标签改名删除保留记录及复盘快照", tests.testCustomTagRenameDeleteKeepsHistoryAndMarksReviewStale),
             ("标签重名校验及失败不写入", tests.testTagValidationRejectsDuplicatesWithoutWriting),
-            ("删除全部标签后无标签计时", tests.testDeletingAllTagsPersistsAndAllowsUntaggedFocus)
+            ("删除全部标签后无标签计时", tests.testDeletingAllTagsPersistsAndAllowsUntaggedFocus),
+            ("专注时长下限与选择持久化", tests.testFocusDurationBoundsAndSelectionPersistence)
         ]
         for (name, check) in checks {
             let before = failureCount
