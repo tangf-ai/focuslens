@@ -3,11 +3,20 @@ import Combine
 import Foundation
 
 @MainActor
+final class ReviewStreamingState: ObservableObject {
+    @Published var text = ""
+}
+
+@MainActor
 final class FocusStore: ObservableObject {
     @Published var data = AppData()
     @Published var now = Date()
     @Published var errorMessage: String?
     @Published var isGenerating = false
+    let reviewStream = ReviewStreamingState()
+    var streamingText: String { reviewStream.text }
+    @Published private(set) var generatingReviewID: UUID?
+    @Published private(set) var generatingMessageID: UUID?
     @Published var focusMode = false
     @Published var keyAvailable = false
     @Published private(set) var hasVisibleWindow = true
@@ -20,16 +29,21 @@ final class FocusStore: ObservableObject {
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var loadingFailed = false
     private var aiTask: Task<Void, Never>?
+    private let aiKeyProvider: () throws -> String?
+    private let keychainScope: String?
     private weak var fullscreenWindow: NSWindow?
     private var enteredFullscreen = false
     private var fileURL: URL { directory.appendingPathComponent("focus-data.json") }
 
-    init(directory: URL? = nil, startClock: Bool = true) {
+    init(directory: URL? = nil, startClock: Bool = true, aiKeyProvider: (() throws -> String?)? = nil) {
         clockEnabled = startClock
+        let scope = directory?.standardizedFileURL.path
+        keychainScope = scope
+        self.aiKeyProvider = aiKeyProvider ?? { try Keychain.read(scope: scope) }
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("FocusLens", isDirectory: true)
         load()
-        keyAvailable = (try? Keychain.read())?.isEmpty == false
+        keyAvailable = (try? Keychain.read(scope: keychainScope))?.isEmpty == false
         tick()
         if startClock {
             observeLifecycle()
@@ -76,6 +90,10 @@ final class FocusStore: ObservableObject {
 
     private func observeLifecycle() {
         let center = NotificationCenter.default
+        let termination = center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cancelReview() }
+        }
+        observers.append((center, termination))
         for name in [NSApplication.didBecomeActiveNotification, NSWindow.didChangeOcclusionStateNotification,
                      NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
                      .NSSystemTimeZoneDidChange, Notification.Name("NSSystemClockDidChangeNotification")] {
@@ -115,6 +133,19 @@ final class FocusStore: ObservableObject {
                 loaded.schemaVersion = 2
             }
             loaded.focusMinutes = min(180, max(5, loaded.focusMinutes))
+            for index in loaded.reviews.indices {
+                if loaded.reviews[index].state == .generating {
+                    loaded.reviews[index].state = .cancelled
+                    loaded.reviews[index].error = "上次生成因应用退出而中断，请重新生成。"
+                }
+                if var messages = loaded.reviews[index].messages {
+                    for offset in messages.indices where messages[offset].state == .generating {
+                        messages[offset].state = .cancelled
+                        messages[offset].error = "上次回复因应用退出而中断，请重新提问。"
+                    }
+                    loaded.reviews[index].messages = messages
+                }
+            }
             data = loaded
         } catch {
             loadingFailed = true
@@ -262,11 +293,16 @@ final class FocusStore: ObservableObject {
     func updateAI(settings: AISettings, newKey: String?) throws {
         _ = try AIService.endpoint(settings.baseURL)
         if let key = newKey {
-            if key.isEmpty { try Keychain.delete() } else { try Keychain.save(key) }
+            if key.isEmpty { try Keychain.delete(scope: keychainScope) } else { try Keychain.save(key, scope: keychainScope) }
         }
         data.aiSettings = settings
-        keyAvailable = (try? Keychain.read())?.isEmpty == false
+        keyAvailable = (try? Keychain.read(scope: keychainScope))?.isEmpty == false
         persist()
+    }
+
+    func deleteAIKey() throws {
+        try Keychain.delete(scope: keychainScope)
+        keyAvailable = false
     }
 
     func setFocusMode(_ enabled: Bool) {
@@ -294,35 +330,117 @@ final class FocusStore: ObservableObject {
         FocusStats(sessions: sessionsIn(data.sessions, interval: period.interval(now: now)))
     }
 
-    func generateReview(period: Period) {
-        guard !isGenerating else { return }
+    @discardableResult
+    func generateReview(period: Period) -> UUID? {
+        guard !isGenerating, !loadingFailed else { return nil }
         let interval = period.interval(now: now)
         let sessions = sessionsIn(data.sessions, interval: interval)
-        guard !sessions.isEmpty else { errorMessage = "这个时间范围还没有专注记录。完成一轮并保存反馈后再生成复盘。"; return }
+        guard !sessions.isEmpty else { errorMessage = "这个时间范围还没有专注记录。完成一轮并保存反馈后再生成复盘。"; return nil }
         let settings = data.aiSettings
         guard !settings.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            errorMessage = "请先在设置中填写 AI 模型名称和接口地址。"; return
+            errorMessage = "请先在设置中填写 AI 模型名称和接口地址。"; return nil
         }
+        do {
+            let body = try AIService.payload(sessions: sessions, interval: interval, model: settings.model, stream: true)
+            let review = Review(createdAt: Date(), start: interval.start, end: interval.end,
+                sessionIDs: sessions.map(\.id), content: "", model: settings.model, evidence: sessions,
+                messages: [], state: .generating)
+            data.reviews.insert(review, at: 0)
+            data.reviews = Array(data.reviews.prefix(50))
+            guard persist() else {
+                data.reviews[0].state = .failed
+                data.reviews[0].error = "复盘无法保存，请检查本地数据目录后重试。"
+                return nil
+            }
+            beginReviewRequest(reviewID: review.id, messageID: nil, body: body, settings: settings)
+            return review.id
+        } catch { errorMessage = error.localizedDescription; return nil }
+    }
+
+    @discardableResult
+    func sendReviewQuestion(reviewID: UUID, question: String) -> Bool {
+        let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isGenerating, !loadingFailed, !question.isEmpty,
+              let index = data.reviews.firstIndex(where: { $0.id == reviewID }), data.reviews[index].canContinue else { return false }
+        let settings = data.aiSettings
+        guard !settings.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errorMessage = "请先在设置中填写 AI 模型名称和接口地址。"; return false
+        }
+        do {
+            let body = try AIService.conversationPayload(review: data.reviews[index], question: question, model: settings.model)
+            let assistant = ReviewMessage(role: .assistant, content: "", state: .generating, model: settings.model)
+            var messages = data.reviews[index].messages ?? []
+            messages.append(ReviewMessage(role: .user, content: question))
+            messages.append(assistant)
+            data.reviews[index].messages = messages
+            guard persist() else {
+                data.reviews[index].messages?[messages.count - 1].state = .failed
+                data.reviews[index].messages?[messages.count - 1].error = "对话无法保存，请检查本地数据目录后重试。"
+                return false
+            }
+            beginReviewRequest(reviewID: reviewID, messageID: assistant.id, body: body, settings: settings)
+            return true
+        } catch { errorMessage = error.localizedDescription; return false }
+    }
+
+    private func beginReviewRequest(reviewID: UUID, messageID: UUID?, body: Data, settings: AISettings) {
         isGenerating = true
+        reviewStream.text = ""
+        generatingReviewID = reviewID
+        generatingMessageID = messageID
         aiTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.isGenerating = false; self.aiTask = nil }
+            defer {
+                self.isGenerating = false
+                self.generatingReviewID = nil
+                self.generatingMessageID = nil
+                self.reviewStream.text = ""
+                self.aiTask = nil
+            }
+            var state: ReviewState = .complete
+            var failure: String?
             do {
-                let key = try Keychain.read()
-                let content = try await AIService.generate(settings: settings, key: key, sessions: sessions, interval: interval)
+                let key = try self.aiKeyProvider()
+                let content = try await AIService.stream(settings: settings, key: key, body: body) { [weak self] text in
+                    self?.reviewStream.text = text
+                }
                 try Task.checkCancellation()
-                self.data.reviews.insert(Review(createdAt: Date(), start: interval.start, end: interval.end,
-                    sessionIDs: sessions.map(\.id), content: content, model: settings.model,
-                    isStale: sessionsIn(self.data.sessions, interval: interval) != sessions), at: 0)
-                self.data.reviews = Array(self.data.reviews.prefix(50))
-                self.persist()
-            } catch is CancellationError {
+                self.reviewStream.text = content
+            } catch is CancellationError { state = .cancelled
             } catch let error as URLError where error.code == .cancelled {
-            } catch { self.errorMessage = error.localizedDescription }
+                state = .cancelled
+            } catch { state = .failed; failure = error.localizedDescription }
+            guard let index = self.data.reviews.firstIndex(where: { $0.id == reviewID }) else { return }
+            if let messageID, let offset = self.data.reviews[index].messages?.firstIndex(where: { $0.id == messageID }) {
+                self.data.reviews[index].messages?[offset].content = self.streamingText
+                self.data.reviews[index].messages?[offset].state = state
+                self.data.reviews[index].messages?[offset].error = failure
+            } else if messageID == nil {
+                self.data.reviews[index].content = self.streamingText
+                self.data.reviews[index].state = state
+                self.data.reviews[index].error = failure
+                if let evidence = self.data.reviews[index].evidence {
+                    let interval = DateInterval(start: self.data.reviews[index].start, end: self.data.reviews[index].end)
+                    self.data.reviews[index].isStale = sessionsIn(self.data.sessions, interval: interval) != evidence
+                }
+            }
+            self.persist()
         }
     }
 
-    func cancelReview() { aiTask?.cancel() }
+    func cancelReview() {
+        aiTask?.cancel()
+        // Save synchronously as well, so quitting the app preserves the visible partial reply.
+        guard isGenerating, let id = generatingReviewID, let index = data.reviews.firstIndex(where: { $0.id == id }) else { return }
+        if let messageID = generatingMessageID, let offset = data.reviews[index].messages?.firstIndex(where: { $0.id == messageID }) {
+            data.reviews[index].messages?[offset].content = streamingText
+            data.reviews[index].messages?[offset].state = .cancelled
+        } else if generatingMessageID == nil {
+            data.reviews[index].content = streamingText
+            data.reviews[index].state = .cancelled
+        }
+        persist()
+    }
 
     func enableFloatingTimer() {
         guard clockEnabled, floatingTimer == nil else { return }

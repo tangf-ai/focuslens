@@ -86,8 +86,7 @@ struct SettingsWorkspace: View {
         .confirmationDialog("从系统钥匙串删除 AI 密钥？", isPresented: $confirmDeleteKey, titleVisibility: .visible) {
             Button("删除密钥", role: .destructive) {
                 do {
-                    try Keychain.delete()
-                    store.keyAvailable = false
+                    try store.deleteAIKey()
                     key = ""
                     replaceKey = false
                 } catch { store.errorMessage = error.localizedDescription }

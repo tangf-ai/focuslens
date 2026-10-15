@@ -30,6 +30,7 @@ func XCTUnwrap<T>(_ value: T?, file: StaticString = #filePath, line: UInt = #lin
 @main
 struct CheckRunner {
     @MainActor static func main() async {
+        setbuf(stdout, nil)
         let tests = FocusLensTests()
         let checks: [(String, () throws -> Void)] = [
             ("暂停扣时与中断计数", tests.testPauseExcludesIdleTimeAndOnlyCountsOnce),
@@ -49,7 +50,10 @@ struct CheckRunner {
             ("标签改名删除保留记录及复盘快照", tests.testCustomTagRenameDeleteKeepsHistoryAndMarksReviewStale),
             ("标签重名校验及失败不写入", tests.testTagValidationRejectsDuplicatesWithoutWriting),
             ("删除全部标签后无标签计时", tests.testDeletingAllTagsPersistsAndAllowsUntaggedFocus),
-            ("专注时长下限与选择持久化", tests.testFocusDurationBoundsAndSelectionPersistence)
+            ("专注时长下限与选择持久化", tests.testFocusDurationBoundsAndSelectionPersistence),
+            ("SSE事件边界和错误解析", tests.testStreamParserSupportsSSEFraming),
+            ("追问快照与未完成轮次隔离", tests.testConversationSnapshotAndIncompleteTurns),
+            ("旧复盘兼容与中断恢复", tests.testReviewArchiveCompatibilityAndInterruptedRecovery)
         ]
         for (name, check) in checks {
             let before = failureCount
@@ -68,7 +72,17 @@ struct CheckRunner {
         do { try await tests.testDeadlineFiresWithoutCountdownView() }
         catch { fail("\(error)", file: #filePath, line: #line) }
         print("\(beforeDeadline == failureCount ? "PASS" : "FAIL") 无界面刷新仍按期完成")
-        print("\(checks.count + 3) 项检查，\(failureCount) 个失败")
+        let streamingChecks: [(String, () async throws -> Void)] = [
+            ("真实HTTP流式传输和异常", tests.testRealStreamingTransportAndFailures),
+            ("流式取消保留已收文字", tests.testStreamingCancellationRetainsText),
+            ("多轮追问快照与保存恢复", tests.testStoreStreamingConversationPersistence)
+        ]
+        for (name, check) in streamingChecks {
+            let before = failureCount
+            do { try await check() } catch { fail("\(error)", file: #filePath, line: #line) }
+            print("\(before == failureCount ? "PASS" : "FAIL") \(name)")
+        }
+        print("\(checks.count + 3 + streamingChecks.count) 项检查，\(failureCount) 个失败")
         if failureCount > 0 { exit(1) }
     }
 }

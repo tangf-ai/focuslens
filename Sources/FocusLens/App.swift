@@ -75,7 +75,7 @@ struct RootView: View {
                 case .timer: TimerWorkspace()
                 case .insights: InsightsView()
                 case .history: HistoryView()
-                case .review: ReviewView(onSettings: { selection = .settings })
+                case .review: ReviewView(stream: store.reviewStream, onSettings: { selection = .settings })
                 case .settings: SettingsWorkspace()
                 }
             }

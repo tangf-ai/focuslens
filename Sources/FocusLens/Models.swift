@@ -113,6 +113,18 @@ struct AISettings: Codable, Equatable {
     var model = ""
 }
 
+enum ReviewState: String, Codable { case generating, complete, cancelled, failed }
+
+struct ReviewMessage: Codable, Identifiable {
+    enum Role: String, Codable { case user, assistant }
+    var id = UUID()
+    var role: Role
+    var content: String
+    var state: ReviewState = .complete
+    var error: String? = nil
+    var model: String? = nil
+}
+
 struct Review: Codable, Identifiable {
     var id = UUID()
     var createdAt: Date
@@ -122,6 +134,22 @@ struct Review: Codable, Identifiable {
     var content: String
     var model: String
     var isStale: Bool? = nil
+    // Optional fields keep earlier review archives readable without a data migration.
+    var evidence: [FocusSession]? = nil
+    var messages: [ReviewMessage]? = nil
+    var state: ReviewState? = nil
+    var error: String? = nil
+
+    var canContinue: Bool { (state == nil || state == .complete) && !content.isEmpty }
+    var transcript: String {
+        func marker(_ state: ReviewState?, _ error: String?) -> String {
+            guard let state, state != .complete else { return "" }
+            return "\n（未完成：\(error ?? (state == .generating ? "正在生成" : "已停止"))）"
+        }
+        return ([content + marker(state, error)] + (messages ?? []).map {
+            "\($0.role == .user ? "我" : "AI")：\n\($0.content)" + marker($0.state, $0.error)
+        }).joined(separator: "\n\n")
+    }
 }
 
 struct AppData: Codable {
