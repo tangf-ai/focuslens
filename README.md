@@ -1,10 +1,12 @@
 # 专注镜 · FocusLens
 
+<img src="docs/screenshots/app-icon-blue.png" alt="专注镜蓝色时钟应用图标" width="88" />
+
 **一个能自动整理活动时间，也能手动专注计时的原生 Mac 小工具。**
 
 连接你选择的视觉模型，间隔识别前台窗口，在浮窗里查看当前活动和估算时长；也可以继续用手动倒计时、目标与反馈。四套可切换主题，无内嵌浏览器。
 
-[下载 Mac 试用版](https://github.com/tangf-ai/focuslens/releases/tag/v0.3.0) · [从源码构建](#源码与构建) · [MIT 开源](LICENSE)
+[下载 Mac 试用版](https://github.com/tangf-ai/focuslens/releases/tag/v0.3.1) · [从源码构建](#源码与构建) · [MIT 开源](LICENSE)
 
 macOS 14+ · Apple 芯片 · 原生 SwiftUI / AppKit
 
