@@ -10,6 +10,7 @@ final class ActivityFloatingController: NSObject {
     private var timer: Timer?
     private var dismissed = false
     private var visibilityObserver: NSObjectProtocol?
+    private var screenSupport: FloatingScreenSupport?
     private let status = NSTextField(labelWithString: "")
     private let title = NSTextField(labelWithString: "")
     private let time = NSTextField(labelWithString: "")
@@ -34,12 +35,15 @@ final class ActivityFloatingController: NSObject {
             let entry = NSMenuItem(title: title, action: selector, keyEquivalent: ""); entry.target = self; menu.addItem(entry)
         }
         item.menu = menu; item.isVisible = tracker.config.enabled; statusItem = item
+        let move = NSMenuItem(title: "浮窗移到当前屏幕", action: #selector(moveFromMenu), keyEquivalent: "")
+        move.target = self; move.toolTip = "移到鼠标当前所在的显示器"; menu.addItem(move)
         observation = tracker.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.refresh() }
         }
     }
     deinit { timer?.invalidate(); if let visibilityObserver { NotificationCenter.default.removeObserver(visibilityObserver) } }
-    func present() { dismissed = false; refresh() }
+    func present() { dismissed = false; refresh(); screenSupport?.ensureVisible() }
+    func moveToCurrentScreen() { present(); screenSupport?.moveToCurrentScreen() }
     private func makePanel() -> NSPanel {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 268), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.identifier = Self.identifier; panel.title = "专注镜 · 自动记录浮窗"
@@ -78,13 +82,16 @@ final class ActivityFloatingController: NSObject {
         configure(restButton, frame: NSRect(x: 15, y: 65, width: 130, height: 30), action: #selector(rest))
         configure(continueButton, frame: NSRect(x: 190, y: 65, width: 100, height: 30), action: #selector(keepGoing))
         let restored = panel.setFrameUsingName("FocusLensAutomaticFloating")
+        let previous = panel.frame
         panel.setContentSize(NSSize(width: 320, height: 268))
-        if let frame = (panel.screen ?? NSScreen.main)?.visibleFrame {
-            let x = restored ? panel.frame.minX : frame.maxX - 344
-            let y = restored ? panel.frame.minY : frame.maxY - 292
-            panel.setFrameOrigin(NSPoint(x: min(max(frame.minX + 10, x), frame.maxX - 330), y: min(max(frame.minY + 10, y), frame.maxY - 278)))
+        if let screen = FloatingScreenSupport.currentScreen {
+            let proposed = restored ? NSRect(x: previous.maxX - 320, y: previous.maxY - 268, width: 320, height: 268)
+                : FloatingPlacement.topRight(size: panel.frame.size, in: screen.visibleFrame)
+            panel.setFrame(FloatingPlacement.recover(proposed, screens: NSScreen.screens.map(\.visibleFrame),
+                                                     preferred: screen.visibleFrame), display: false)
         }
         panel.setFrameAutosaveName("FocusLensAutomaticFloating")
+        screenSupport = FloatingScreenSupport(panel: panel)
         visibilityObserver = NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: panel, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
@@ -151,6 +158,7 @@ final class ActivityFloatingController: NSObject {
     }
     @objc private func edit() { if let segment = tracker?.display { tracker?.edit(segment) } }
     @objc private func showFromMenu() { present() }
+    @objc private func moveFromMenu() { moveToCurrentScreen() }
     @objc private func openMain() { tracker?.openMain?() }
     @objc private func hide() { dismissed = true; timer?.invalidate(); timer = nil; panel?.orderOut(nil) }
     @objc private func rest() { tracker?.rest() }

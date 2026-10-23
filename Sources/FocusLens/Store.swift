@@ -486,6 +486,11 @@ final class FocusStore: ObservableObject {
         floatingTimer?.present()
     }
 
+    func moveFloatingTimerToCurrentScreen() {
+        enableFloatingTimer()
+        floatingTimer?.moveToCurrentScreen()
+    }
+
     func restoreMainWindow() {
         let window = NSApp.windows.first { $0.identifier != FloatingTimerController.identifier && $0.canBecomeMain }
         if let window {

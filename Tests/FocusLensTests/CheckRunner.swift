@@ -59,7 +59,11 @@ struct CheckRunner {
             ("自动跨日与人工修正", tests.testActivityMidnightAndCorrection),
             ("视觉分类严格解析", tests.testVisionParsingAndTextOnlyRejection),
             ("图片内存编码与图片请求", tests.testMemoryImageEncodingAndRequest),
-            ("自动复盘不虚构完成率", tests.testAutomaticReviewNeverInventsCompletion)
+            ("自动复盘不虚构完成率", tests.testAutomaticReviewNeverInventsCompletion),
+            ("左侧竖屏与拔屏后浮窗恢复", tests.testPortraitDisplayAndRemovedDisplayRecovery),
+            ("浮窗跨屏面积选择与点坐标", tests.testPanelPlacementUsesDominantDisplayAndPoints),
+            ("多屏前台窗口选择与断屏过滤", tests.testCaptureSelectsFrontWindowAcrossDisplays),
+            ("多屏截图过滤其他应用与覆盖窗口", tests.testCaptureSkipsUnrelatedOverlayAndHiddenWindows)
         ]
         for (name, check) in checks {
             let before = failureCount
@@ -82,6 +86,7 @@ struct CheckRunner {
             ("真实HTTP流式传输和异常", tests.testRealStreamingTransportAndFailures),
             ("流式取消保留已收文字", tests.testStreamingCancellationRetainsText),
             ("多轮追问快照与保存恢复", tests.testStoreStreamingConversationPersistence),
+            ("屏幕变化找回隐藏浮窗且不自动显示", tests.testScreenChangeRecoversHiddenPanelWithoutShowingIt),
             ("后台识别保留活动与等待状态区分", tests.testBackgroundRecognitionKeepsConfirmedActivity),
             ("自动记录授权与排除门槛", tests.testAutomaticConsentAndPrivacyGates),
             ("单次识别取消与截图不落盘", tests.testAutomaticSingleFlightCancellationAndMemoryOnly),

@@ -23,6 +23,31 @@ struct MemoryScreenCapture {
         return session["CGSSessionScreenIsLocked"] as? Bool != true
     }
 
+    static func connectedDisplayBounds() -> [CGRect] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return [] }
+        return displays.prefix(Int(count)).map { CGDisplayBounds($0) }
+    }
+
+    /// CGWindowList is ordered front to back across every display, in Quartz coordinates.
+    /// No dependence on the primary display, pointer location, or an Accessibility permission.
+    static func frontWindowID(in windows: [[String: Any]], pid: pid_t, displayBounds: [CGRect]) -> CGWindowID? {
+        for window in windows {
+            guard (window[kCGWindowOwnerPID as String] as? Int) == Int(pid),
+                  (window[kCGWindowLayer as String] as? Int) == 0,
+                  (window[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let bounds = window[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  rect.width >= 100, rect.height >= 80,
+                  displayBounds.contains(where: { $0.intersects(rect) }),
+                  let number = window[kCGWindowNumber as String] as? UInt32 else { continue }
+            return number
+        }
+        return nil
+    }
+
     static func encode(_ image: CGImage) throws -> Data {
         for quality in [0.68, 0.5, 0.32] {
             let output = NSMutableData()
@@ -37,9 +62,7 @@ struct MemoryScreenCapture {
         guard allowed, sessionAvailable else { throw AutomaticError.permission }
         guard app.bundleID != Bundle.main.bundleIdentifier else { throw AutomaticError.noWindow }
         let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-        guard let front = windows.first(where: {
-            ($0[kCGWindowOwnerPID as String] as? Int) == Int(app.pid) && ($0[kCGWindowLayer as String] as? Int) == 0 && ($0[kCGWindowAlpha as String] as? Double ?? 1) > 0
-        }), let number = front[kCGWindowNumber as String] as? UInt32 else { throw AutomaticError.noWindow }
+        guard let number = frontWindowID(in: windows, pid: app.pid, displayBounds: connectedDisplayBounds()) else { throw AutomaticError.noWindow }
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
         guard let window = content.windows.first(where: { $0.windowID == number && $0.owningApplication?.processID == app.pid }), window.frame.width >= 100, window.frame.height >= 80 else { throw AutomaticError.noWindow }
         let filter = SCContentFilter(desktopIndependentWindow: window)
@@ -52,9 +75,8 @@ struct MemoryScreenCapture {
         let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: settings)
         try Task.checkCancellation()
         let latest = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-        let currentWindow = latest.first { ($0[kCGWindowOwnerPID as String] as? Int) == Int(app.pid) && ($0[kCGWindowLayer as String] as? Int) == 0 }
         guard allowed, sessionAvailable, ForegroundContext.current() == app,
-              currentWindow?[kCGWindowNumber as String] as? UInt32 == number else { throw AutomaticError.noWindow }
+              frontWindowID(in: latest, pid: app.pid, displayBounds: connectedDisplayBounds()) == number else { throw AutomaticError.noWindow }
         return try autoreleasepool {
             let jpeg = try encode(image)
             var pixels = [UInt8](repeating: 0, count: 32 * 32)

@@ -22,6 +22,7 @@ swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Sources/FocusLens/ActivityModels.swift" \
     "$PROJECT_DIR/Sources/FocusLens/VisionService.swift" \
     "$PROJECT_DIR/Sources/FocusLens/MemoryScreenCapture.swift" \
+    "$PROJECT_DIR/Sources/FocusLens/FloatingScreenSupport.swift" \
     "$PROJECT_DIR/Sources/FocusLens/AutomaticTracker.swift" \
     "$PROJECT_DIR/Sources/FocusLens/ActivityFloating.swift" \
     "$PROJECT_DIR/Sources/FocusLens/AIService.swift" \
@@ -30,6 +31,7 @@ swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Tests/FocusLensTests/FocusLensTests.swift" \
     "$PROJECT_DIR/Tests/FocusLensTests/StreamingTests.swift" \
     "$PROJECT_DIR/Tests/FocusLensTests/AutomaticTests.swift" \
+    "$PROJECT_DIR/Tests/FocusLensTests/MultiscreenTests.swift" \
     "$PROJECT_DIR/Tests/FocusLensTests/CheckRunner.swift" \
     -o "$CHECK_DIR/checks"
 "$CHECK_DIR/checks"

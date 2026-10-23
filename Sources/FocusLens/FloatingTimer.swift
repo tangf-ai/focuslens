@@ -58,6 +58,7 @@ final class FloatingTimerController: NSObject {
     private var focusGoal = ""
     private var observation: AnyCancellable?
     private var visibilityObserver: NSObjectProtocol?
+    private var screenSupport: FloatingScreenSupport?
     private var displayTimer: Timer?
     private var currentRun: TimerRun?
     private var runID: UUID?
@@ -83,6 +84,12 @@ final class FloatingTimerController: NSObject {
         guard currentRun != nil || hasFeedback || restFinished else { return }
         dismissed = false
         showPanel()
+        screenSupport?.ensureVisible()
+    }
+
+    func moveToCurrentScreen() {
+        guard currentRun != nil || hasFeedback || restFinished else { return }
+        present(); screenSupport?.moveToCurrentScreen()
     }
 
     private func update(_ data: AppData) {
@@ -201,16 +208,14 @@ final class FloatingTimerController: NSObject {
             panel.setContentSize(panelSize)
             panel.setFrameOrigin(NSPoint(x: oldFrame.maxX - panelSize.width, y: oldFrame.maxY - panelSize.height))
         }
-        let screen = NSScreen.screens.first { $0.visibleFrame.intersects(panel.frame) }
-            ?? NSScreen.main ?? NSScreen.screens.first
+        let screen = FloatingScreenSupport.currentScreen
         if let available = screen?.visibleFrame {
-            let x = restored ? panel.frame.minX : available.maxX - panelSize.width - 24
-            let y = restored ? panel.frame.minY : available.maxY - panelSize.height - 24
-            panel.setFrameOrigin(NSPoint(
-                x: min(max(x, available.minX + 12), available.maxX - panelSize.width - 12),
-                y: min(max(y, available.minY + 12), available.maxY - panelSize.height - 12)))
+            let proposed = restored ? panel.frame : FloatingPlacement.topRight(size: panelSize, in: available)
+            panel.setFrame(FloatingPlacement.recover(proposed, screens: NSScreen.screens.map(\.visibleFrame),
+                                                     preferred: available), display: false)
         }
         panel.setFrameAutosaveName("FocusLensFloatingTimer")
+        screenSupport = FloatingScreenSupport(panel: panel)
         visibilityObserver = NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
             object: panel, queue: .main) { [weak self] _ in
                 Task { @MainActor [weak self] in
@@ -248,7 +253,7 @@ final class FloatingTimerController: NSObject {
     private func showPanel() {
         if panel == nil { panel = makePanel() }
         refreshText()
-        if panel?.isVisible != true { panel?.orderFrontRegardless() }
+        if panel?.isVisible != true { screenSupport?.ensureVisible(); panel?.orderFrontRegardless() }
         configureDisplayTimer()
     }
 
@@ -332,6 +337,7 @@ final class FloatingTimerController: NSObject {
         for view in upperViews { view.frame.origin.y += offset }
         let bottom = panel.screen?.visibleFrame.minY ?? oldFrame.minY
         panel.setFrameOrigin(NSPoint(x: oldFrame.minX, y: max(bottom + 12, oldFrame.maxY - panelSize.height)))
+        screenSupport?.ensureVisible()
     }
 
     @objc private func togglePause() { store?.togglePause() }

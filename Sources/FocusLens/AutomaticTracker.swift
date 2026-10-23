@@ -262,6 +262,10 @@ final class AutomaticTracker: ObservableObject {
         cancelWork(at: date); manual = blocked; reconcile()
     }
     func showFloating() { guard clockEnabled else { return }; if floating == nil { floating = ActivityFloatingController(tracker: self) }; floating?.present() }
+    func moveFloatingToCurrentScreen() {
+        guard config.enabled else { return }
+        showFloating(); floating?.moveToCurrentScreen()
+    }
     func installFloating() {
         if clockEnabled, floating == nil { floating = ActivityFloatingController(tracker: self); floating?.refresh() }
     }

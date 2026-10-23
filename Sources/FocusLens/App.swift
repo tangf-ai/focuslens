@@ -28,8 +28,13 @@ struct FocusLensApp: App {
             CommandGroup(replacing: .newItem) { }
             CommandMenu("专注") {
                 Button("显示活动浮窗") { store.automatic.showFloating() }.disabled(!store.automatic.config.enabled)
+                Button("活动浮窗移到当前屏幕") { store.automatic.moveFloatingToCurrentScreen() }
+                    .help("移到鼠标当前所在的显示器").disabled(!store.automatic.config.enabled)
                 Button("显示倒计时浮窗") { store.showFloatingTimer() }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
+                    .disabled(store.data.activeRun == nil && store.data.pendingFeedback == nil)
+                Button("倒计时浮窗移到当前屏幕") { store.moveFloatingTimerToCurrentScreen() }
+                    .help("移到鼠标当前所在的显示器")
                     .disabled(store.data.activeRun == nil && store.data.pendingFeedback == nil)
 
                 Button("暂停 / 继续") { store.togglePause() }
