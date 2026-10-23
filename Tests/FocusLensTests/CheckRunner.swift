@@ -53,7 +53,12 @@ struct CheckRunner {
             ("专注时长下限与选择持久化", tests.testFocusDurationBoundsAndSelectionPersistence),
             ("SSE事件边界和错误解析", tests.testStreamParserSupportsSSEFraming),
             ("追问快照与未完成轮次隔离", tests.testConversationSnapshotAndIncompleteTurns),
-            ("旧复盘兼容与中断恢复", tests.testReviewArchiveCompatibilityAndInterruptedRecovery)
+            ("旧复盘兼容与中断恢复", tests.testReviewArchiveCompatibilityAndInterruptedRecovery),
+            ("自动时间段合并与离线间隔", tests.testActivityLedgerBoundariesAndRestart),
+            ("自动跨日与人工修正", tests.testActivityMidnightAndCorrection),
+            ("视觉分类严格解析", tests.testVisionParsingAndTextOnlyRejection),
+            ("图片内存编码与图片请求", tests.testMemoryImageEncodingAndRequest),
+            ("自动复盘不虚构完成率", tests.testAutomaticReviewNeverInventsCompletion)
         ]
         for (name, check) in checks {
             let before = failureCount
@@ -75,7 +80,12 @@ struct CheckRunner {
         let streamingChecks: [(String, () async throws -> Void)] = [
             ("真实HTTP流式传输和异常", tests.testRealStreamingTransportAndFailures),
             ("流式取消保留已收文字", tests.testStreamingCancellationRetainsText),
-            ("多轮追问快照与保存恢复", tests.testStoreStreamingConversationPersistence)
+            ("多轮追问快照与保存恢复", tests.testStoreStreamingConversationPersistence),
+            ("自动记录授权与排除门槛", tests.testAutomaticConsentAndPrivacyGates),
+            ("单次识别取消与截图不落盘", tests.testAutomaticSingleFlightCancellationAndMemoryOnly),
+            ("自动断连与历史文件不覆盖", tests.testAutomaticFailureAndHistoricalSafety),
+            ("真实HTTP视觉图片与能力检测", tests.testVisionWireCapabilityContract),
+            ("图片请求不跟随重定向", tests.testVisionRedirectNeverForwardsImage)
         ]
         for (name, check) in streamingChecks {
             let before = failureCount

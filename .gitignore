@@ -15,5 +15,7 @@
 .env.*
 !.env.example
 focus-data.json
+automatic-settings.json
+automatic-activities/
 *-export.json
 *.log

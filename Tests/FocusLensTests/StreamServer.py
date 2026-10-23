@@ -36,6 +36,30 @@ class Handler(BaseHTTPRequestHandler):
                 requests.append({"body": body, "authorized": self.headers.get("Authorization") == "Bearer test-secret",
                                  "hasAuthorization": bool(self.headers.get("Authorization"))})
             route = self.path.split("/")[1]
+            if route == "vision-redirect":
+                self.send_response(307)
+                self.send_header("Location", "http://127.0.0.1:" + str(self.server.server_port) + "/vision/chat/completions")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if route == "vision":
+                import base64
+                parts = body["messages"][-1]["content"]
+                encoded = parts[1]["image_url"]["url"]
+                image = base64.b64decode(encoded.split(",", 1)[1])
+                if encoded.startswith("data:image/png;"):
+                    assert image.startswith(b"\x89PNG")
+                    answer = {"code": "7314", "color": "blue"}
+                else:
+                    assert image.startswith(b"\xff\xd8")
+                    answer = {"category": "阅读", "title": "测试文档", "confidence": "high"}
+                result = json.dumps({"choices": [{"message": {"content": json.dumps(answer, ensure_ascii=False)}, "finish_reason": "stop"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(result)))
+                self.end_headers()
+                self.wfile.write(result)
+                return
             if route == "denied":
                 self.send_error(401)
                 return

@@ -23,6 +23,15 @@ final class FocusStore: ObservableObject {
     let directory: URL
     var openMainWindowAction: (() -> Void)?
     private var floatingTimer: FloatingTimerController?
+    private var automaticInstance: AutomaticTracker?
+    var automatic: AutomaticTracker {
+        if let automaticInstance { return automaticInstance }
+        let tracker = AutomaticTracker(directory: directory, startClock: clockEnabled)
+        tracker.setManualBlocked(data.activeRun != nil || data.pendingFeedback != nil)
+        automaticInstance = tracker
+        return tracker
+    }
+    func reviewAPIKey() throws -> String? { try aiKeyProvider() }
     private let clockEnabled: Bool
     private var completionTimer: Timer?
     private var calendarTimer: Timer?
@@ -91,7 +100,7 @@ final class FocusStore: ObservableObject {
     private func observeLifecycle() {
         let center = NotificationCenter.default
         let termination = center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.cancelReview() }
+            MainActor.assumeIsolated { self?.cancelReview(); self?.automaticInstance?.shutdown() }
         }
         observers.append((center, termination))
         for name in [NSApplication.didBecomeActiveNotification, NSWindow.didChangeOcclusionStateNotification,
@@ -111,7 +120,7 @@ final class FocusStore: ObservableObject {
 
     private func refreshAfterLifecycleChange() {
         if let windows = NSApp?.windows {
-            let visible = windows.contains { $0.identifier != FloatingTimerController.identifier && $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible) }
+            let visible = windows.contains { $0.identifier != FloatingTimerController.identifier && $0.identifier != ActivityFloatingController.identifier && $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible) }
             if visible != hasVisibleWindow { hasVisibleWindow = visible }
         }
         tick()
@@ -176,6 +185,7 @@ final class FocusStore: ObservableObject {
 
     func start(goal: String, kind: TaskKind, minutes: Int, phase: RunPhase = .focus, at instant: Date = Date()) {
         guard !loadingFailed, data.activeRun == nil, data.pendingFeedback == nil else { return }
+        automaticInstance?.setManualBlocked(true, at: instant)
         let cleanGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
         now = instant
         data.activeRun = TimerRun(phase: phase, goal: cleanGoal, kind: kind, seconds: TimeInterval(max(phase == .focus ? 5 : 1, min(180, minutes)) * 60), now: instant)
@@ -199,6 +209,7 @@ final class FocusStore: ObservableObject {
         data.activeRun = nil
         armCompletionTimer()
         if run.phase == .focus { data.pendingFeedback = SessionDraft(run: run, endedAt: endedAt) }
+        automaticInstance?.setManualBlocked(data.pendingFeedback != nil)
         exitFocusMode()
         persist()
     }
@@ -208,6 +219,7 @@ final class FocusStore: ObservableObject {
         let safeRating = rating.flatMap { (1...5).contains($0) ? $0 : nil }
         data.sessions.append(draft.saved(outcome: outcome, rating: safeRating, note: String(note.prefix(1000))))
         data.pendingFeedback = nil
+        automaticInstance?.setManualBlocked(false)
         persist()
     }
 
@@ -342,6 +354,7 @@ final class FocusStore: ObservableObject {
         }
         do {
             let body = try AIService.payload(sessions: sessions, interval: interval, model: settings.model, stream: true)
+            let key = try aiKeyProvider()
             let review = Review(createdAt: Date(), start: interval.start, end: interval.end,
                 sessionIDs: sessions.map(\.id), content: "", model: settings.model, evidence: sessions,
                 messages: [], state: .generating)
@@ -352,7 +365,27 @@ final class FocusStore: ObservableObject {
                 data.reviews[0].error = "复盘无法保存，请检查本地数据目录后重试。"
                 return nil
             }
-            beginReviewRequest(reviewID: review.id, messageID: nil, body: body, settings: settings)
+            beginReviewRequest(reviewID: review.id, messageID: nil, body: body, settings: settings, key: key)
+            return review.id
+        } catch { errorMessage = error.localizedDescription; return nil }
+    }
+
+    var activityReviewSettings: AISettings { data.aiSettings.model.isEmpty ? automatic.config.ai : data.aiSettings }
+    @discardableResult
+    func generateActivityReview(period: Period) -> UUID? {
+        guard !isGenerating, !loadingFailed else { return nil }
+        let interval = period.interval(now: Date()), segments = automatic.segments(in: period.interval(now: Date()))
+        guard !segments.isEmpty else { errorMessage = "所选范围还没有自动活动记录。"; return nil }
+        let settings = activityReviewSettings
+        do {
+            guard !settings.model.isEmpty else { throw AutomaticError.missingModel }
+            let body = try AIService.activityPayload(segments: segments, interval: interval, model: settings.model)
+            let key = try data.aiSettings.model.isEmpty ? automatic.visionAPIKey() : aiKeyProvider()
+            let review = Review(createdAt: Date(), start: interval.start, end: interval.end, sessionIDs: segments.map(\.id),
+                                content: "", model: settings.model, activityEvidence: segments, messages: [], state: .generating)
+            data.reviews.insert(review, at: 0); data.reviews = Array(data.reviews.prefix(50))
+            guard persist() else { data.reviews[0].state = .failed; data.reviews[0].error = "无法保存复盘，未发送请求。"; return nil }
+            beginReviewRequest(reviewID: review.id, messageID: nil, body: body, settings: settings, key: key)
             return review.id
         } catch { errorMessage = error.localizedDescription; return nil }
     }
@@ -362,12 +395,14 @@ final class FocusStore: ObservableObject {
         let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isGenerating, !loadingFailed, !question.isEmpty,
               let index = data.reviews.firstIndex(where: { $0.id == reviewID }), data.reviews[index].canContinue else { return false }
-        let settings = data.aiSettings
+        let automaticReview = data.reviews[index].activityEvidence != nil
+        let settings = automaticReview ? activityReviewSettings : data.aiSettings
         guard !settings.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             errorMessage = "请先在设置中填写 AI 模型名称和接口地址。"; return false
         }
         do {
             let body = try AIService.conversationPayload(review: data.reviews[index], question: question, model: settings.model)
+            let key = try automaticReview && data.aiSettings.model.isEmpty ? automatic.visionAPIKey() : aiKeyProvider()
             let assistant = ReviewMessage(role: .assistant, content: "", state: .generating, model: settings.model)
             var messages = data.reviews[index].messages ?? []
             messages.append(ReviewMessage(role: .user, content: question))
@@ -378,12 +413,12 @@ final class FocusStore: ObservableObject {
                 data.reviews[index].messages?[messages.count - 1].error = "对话无法保存，请检查本地数据目录后重试。"
                 return false
             }
-            beginReviewRequest(reviewID: reviewID, messageID: assistant.id, body: body, settings: settings)
+            beginReviewRequest(reviewID: reviewID, messageID: assistant.id, body: body, settings: settings, key: key)
             return true
         } catch { errorMessage = error.localizedDescription; return false }
     }
 
-    private func beginReviewRequest(reviewID: UUID, messageID: UUID?, body: Data, settings: AISettings) {
+    private func beginReviewRequest(reviewID: UUID, messageID: UUID?, body: Data, settings: AISettings, key: String?) {
         isGenerating = true
         reviewStream.text = ""
         generatingReviewID = reviewID
@@ -400,7 +435,6 @@ final class FocusStore: ObservableObject {
             var state: ReviewState = .complete
             var failure: String?
             do {
-                let key = try self.aiKeyProvider()
                 let content = try await AIService.stream(settings: settings, key: key, body: body) { [weak self] text in
                     self?.reviewStream.text = text
                 }

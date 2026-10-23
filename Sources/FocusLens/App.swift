@@ -16,6 +16,7 @@ struct FocusLensApp: App {
     var body: some Scene {
         WindowGroup("专注镜", id: "main") {
             RootView().environmentObject(store).frame(minWidth: 860, minHeight: 620)
+                .environmentObject(store.automatic)
                 .preferredColorScheme(.light)
                 .tint(Theme.accent)
                 .environment(\.locale, Locale(identifier: "zh_CN"))
@@ -26,6 +27,7 @@ struct FocusLensApp: App {
         .commands {
             CommandGroup(replacing: .newItem) { }
             CommandMenu("专注") {
+                Button("显示活动浮窗") { store.automatic.showFloating() }.disabled(!store.automatic.config.enabled)
                 Button("显示倒计时浮窗") { store.showFloatingTimer() }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
                     .disabled(store.data.activeRun == nil && store.data.pendingFeedback == nil)
@@ -50,10 +52,12 @@ enum Theme {
 }
 
 enum Destination: String, CaseIterable, Identifiable {
-    case timer = "专注计时", insights = "本周统计", history = "专注记录", review = "AI 复盘", settings = "设置"
+    case automatic = "自动记录", activity = "活动时间线", insights = "本周统计", review = "AI 复盘", timer = "手动计时", history = "专注记录", settings = "设置"
     var id: String { rawValue }
     var symbol: String {
         switch self {
+        case .automatic: "viewfinder"
+        case .activity: "list.bullet"
         case .timer: "timer"
         case .insights: "chart.bar.xaxis"
         case .history: "clock.arrow.circlepath"
@@ -65,15 +69,24 @@ enum Destination: String, CaseIterable, Identifiable {
 
 struct RootView: View {
     @EnvironmentObject private var store: FocusStore
-    @State private var selection: Destination = .timer
+    @EnvironmentObject private var activity: AutomaticTracker
+    @State private var selection: Destination = .automatic
+    @State private var automaticStatistics = true
     @Environment(\.openWindow) private var openWindow
     var body: some View {
         HStack(spacing: 0) {
             if !store.focusMode { sidebar }
             Group {
                 switch selection {
+                case .automatic: AutomaticHome(onSettings: { selection = .settings }, onTimeline: { selection = .activity })
+                case .activity: ActivityTimeline()
                 case .timer: TimerWorkspace()
-                case .insights: InsightsView()
+                case .insights:
+                    VStack(spacing: 0) {
+                        Picker("统计口径", selection: $automaticStatistics) { Text("自动活动").tag(true); Text("手动专注").tag(false) }
+                            .pickerStyle(.segmented).frame(width: 260).padding(.top, 18)
+                        if automaticStatistics { ActivityStatistics() } else { InsightsView() }
+                    }
                 case .history: HistoryView()
                 case .review: ReviewView(stream: store.reviewStream, onSettings: { selection = .settings })
                 case .settings: SettingsWorkspace()
@@ -86,6 +99,8 @@ struct RootView: View {
             let opener = openWindow
             store.openMainWindowAction = { opener(id: "main") }
             store.enableFloatingTimer()
+            activity.openMain = { selection = .automatic; store.restoreMainWindow() }
+            activity.installFloating()
             store.applyCompactMainWindow()
         }
         .foregroundStyle(Theme.ink)
@@ -93,9 +108,10 @@ struct RootView: View {
         .sheet(item: Binding(get: { store.data.pendingFeedback }, set: { _ in })) { draft in
             FeedbackView(draft: draft).environmentObject(store).interactiveDismissDisabled()
         }
-        .alert("需要处理", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
-            Button("知道了") { store.errorMessage = nil }
-        } message: { Text(store.errorMessage ?? "") }
+        .sheet(item: $activity.editingSegment) { ActivityEditSheet(segment: $0) }
+        .alert("需要处理", isPresented: Binding(get: { store.errorMessage != nil || activity.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil; activity.errorMessage = nil } })) {
+            Button("知道了") { store.errorMessage = nil; activity.errorMessage = nil }
+        } message: { Text(store.errorMessage ?? activity.errorMessage ?? "") }
     }
 
     private var sidebar: some View {
@@ -127,9 +143,10 @@ struct RootView: View {
             }
             Spacer()
             VStack(alignment: .leading, spacing: 9) {
-                Text("今日累计").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                Text("手动专注累计").font(.system(size: 11)).foregroundStyle(Theme.muted)
                 Text(durationText(store.stats(.today).totalSeconds)).font(.system(size: 21, weight: .medium, design: .rounded))
                 Text("\(store.stats(.today).sessions.count) 轮已记录").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                Text(activity.status.label).font(.system(size: 10)).foregroundStyle(Theme.muted)
             }
             .padding(.horizontal, 14).padding(.bottom, 30)
             Rectangle().fill(Theme.line).frame(height: 1)

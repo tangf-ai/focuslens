@@ -3,6 +3,7 @@ import AppKit
 
 struct ReviewView: View {
     @EnvironmentObject private var store: FocusStore
+    @EnvironmentObject private var activity: AutomaticTracker
     @ObservedObject var stream: ReviewStreamingState
     let onSettings: () -> Void
     @State private var period: Period = .today
@@ -10,15 +11,19 @@ struct ReviewView: View {
     @State private var question = ""
     @State private var copied = false
     @State private var followsOutput = true
+    @State private var automaticSource = false
+    private var activities: [ActivitySegment] { activity.segments(in: interval) }
+    private var noRecords: Bool { automaticSource ? activities.isEmpty : sessions.isEmpty }
     private var interval: DateInterval { period.interval(now: store.now) }
     private var sessions: [FocusSession] { sessionsIn(store.data.sessions, interval: interval) }
     private var report: Review? {
         if let selectedReviewID { return store.data.reviews.first { $0.id == selectedReviewID } }
-        return store.data.reviews.first { $0.start == interval.start && $0.end == interval.end }
+        return store.data.reviews.first { $0.start == interval.start && $0.end == interval.end && ($0.activityEvidence != nil) == automaticSource }
     }
     private var active: Bool { store.isGenerating && store.generatingReviewID == report?.id }
     private var stale: Bool {
         guard let report else { return false }
+        if let evidence = report.activityEvidence { return activity.segments(in: DateInterval(start: report.start, end: report.end)) != evidence }
         let current = sessionsIn(store.data.sessions, interval: DateInterval(start: report.start, end: report.end))
         return report.isStale == true || Set(report.sessionIDs) != Set(current.map(\.id))
     }
@@ -31,8 +36,9 @@ struct ReviewView: View {
                 if !store.data.reviews.isEmpty {
                     Menu("历史复盘") {
                         ForEach(store.data.reviews) { review in
-                            Button("\(review.start.formatted(.dateTime.locale(Locale(identifier: "zh_CN")).month().day())) · \(review.end.timeIntervalSince(review.start) > 90000 ? "周" : "日")复盘 · \(review.createdAt.formatted(.dateTime.locale(Locale(identifier: "zh_CN")).hour().minute()))") {
+                            Button("\(review.activityEvidence == nil ? "手动" : "自动") · \(review.start.formatted(.dateTime.locale(Locale(identifier: "zh_CN")).month().day())) · \(review.createdAt.formatted(.dateTime.locale(Locale(identifier: "zh_CN")).hour().minute()))") {
                                 selectedReviewID = review.id
+                                automaticSource = review.activityEvidence != nil
                                 question = ""
                             }
                         }
@@ -41,28 +47,31 @@ struct ReviewView: View {
                 Button("接口设置", action: onSettings).buttonStyle(QuietButtonStyle())
             }
             HStack {
-                Picker("复盘范围", selection: $period) { ForEach(Period.allCases) { Text($0.rawValue).tag($0) } }
+                Picker("记录来源", selection: Binding(get: { automaticSource }, set: { automaticSource = $0; selectedReviewID = nil; question = ""; copied = false })) { Text("自动活动").tag(true); Text("手动专注").tag(false) }
                     .pickerStyle(.segmented).frame(width: 180).disabled(store.isGenerating)
+                Picker("复盘范围", selection: $period) { ForEach(Period.allCases) { Text($0.rawValue).tag($0) } }
+                    .pickerStyle(.segmented).frame(width: 130).disabled(store.isGenerating)
                 Spacer()
                 if store.isGenerating {
                     ProgressView().controlSize(.small)
                     Button("停止生成") { store.cancelReview() }.buttonStyle(QuietButtonStyle())
                 } else {
                     Button(report == nil ? "生成复盘" : (report?.start == interval.start && report?.end == interval.end ? "重新生成" : "生成\(period.rawValue)复盘")) {
-                        if let id = store.generateReview(period: period) { selectedReviewID = id; question = ""; followsOutput = true }
-                    }.buttonStyle(AccentButtonStyle()).disabled(sessions.isEmpty)
+                        let id = automaticSource ? store.generateActivityReview(period: period) : store.generateReview(period: period)
+                        if let id { selectedReviewID = id; question = ""; followsOutput = true }
+                    }.buttonStyle(AccentButtonStyle()).disabled(noRecords)
                 }
             }
             VStack(alignment: .leading, spacing: 5) {
                 if let report {
-                    Text("\(report.evidence == nil ? "历史复盘" : "记录快照")：\(report.start.formatted(.dateTime.locale(Locale(identifier: "zh_CN")).month().day())) 起 · \(report.sessionIDs.count) 轮 · \(report.model)")
+                    Text("\(report.activityEvidence != nil ? "自动活动快照" : report.evidence == nil ? "历史复盘" : "记录快照")：\(report.start.formatted(.dateTime.locale(Locale(identifier: "zh_CN")).month().day())) 起 · \(report.sessionIDs.count) \(report.activityEvidence == nil ? "轮" : "段") · \(report.model)")
                         .font(.system(size: 11, weight: .medium)).lineLimit(1)
-                    Text(report.evidence == nil ? "追问会发送这份复盘文字和已完成对话给当前配置的 AI 服务。" : "追问会发送这份复盘、原始记录快照和已完成对话给当前配置的 AI 服务。")
+                    Text(report.activityEvidence != nil ? "追问发送这份文字活动快照和已完成对话，不含截图。" : report.evidence == nil ? "追问会发送这份复盘文字和已完成对话给当前配置的 AI 服务。" : "追问会发送这份复盘、原始记录快照和已完成对话给当前配置的 AI 服务。")
                         .font(.system(size: 10)).foregroundStyle(Theme.muted)
                 } else {
-                    Text("分析范围：\(period.rawValue) · \(sessions.count) 轮 · \(durationText(FocusStats(sessions: sessions).totalSeconds))")
+                    Text(automaticSource ? "分析范围：\(period.rawValue) · \(activities.count) 段自动估算活动" : "分析范围：\(period.rawValue) · \(sessions.count) 轮 · \(durationText(FocusStats(sessions: sessions).totalSeconds))")
                         .font(.system(size: 11, weight: .medium))
-                    Text("点击生成时，将范围内的目标、时长、完成情况、评分和反馈发送给你配置的 AI 服务。")
+                    Text(automaticSource ? "仅发送时间、分类与活动概括，不发送或重新读取历史截图。\n复盘服务：\(store.activityReviewSettings.baseURL) · \(store.activityReviewSettings.model)" : "点击生成时，将范围内的目标、时长、完成情况、评分和反馈发送给你配置的 AI 服务。")
                         .font(.system(size: 10)).foregroundStyle(Theme.muted)
                 }
             }
@@ -71,8 +80,8 @@ struct ReviewView: View {
                 conversation(report)
                 if report.canContinue { composer(report) }
             } else {
-                EmptyState(symbol: "sparkles", title: sessions.isEmpty ? "先积累一轮专注" : "记录已经准备好",
-                    detail: sessions.isEmpty ? "完成专注并保存反馈后，就可以生成复盘。" : "生成结果会逐步显示，你也可以继续提问。")
+                EmptyState(symbol: "sparkles", title: noRecords ? "先积累一些记录" : "记录已经准备好",
+                    detail: noRecords ? "选择有记录的范围后，就可以生成复盘。" : "生成结果会逐步显示，你也可以继续提问。")
             }
         }
         .padding(24).padding(.top, 4)
@@ -82,6 +91,7 @@ struct ReviewView: View {
             if let id = store.generatingReviewID, let review = store.data.reviews.first(where: { $0.id == id }) {
                 period = review.end.timeIntervalSince(review.start) > 90000 ? .week : .today
                 selectedReviewID = id
+                automaticSource = review.activityEvidence != nil
             }
         }
     }
@@ -106,7 +116,7 @@ struct ReviewView: View {
                 Text("记录已有变化；本次对话沿用原快照，重新生成可更新分析。")
                     .font(.system(size: 10)).foregroundStyle(Theme.accent)
             }
-            if review.evidence == nil {
+            if review.evidence == nil && review.activityEvidence == nil {
                 Text("这份旧复盘仅保留分析文字；重新生成可带入原始记录快照。")
                     .font(.system(size: 10)).foregroundStyle(Theme.muted)
             }

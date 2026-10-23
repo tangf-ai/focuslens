@@ -136,6 +136,7 @@ struct Review: Codable, Identifiable {
     var isStale: Bool? = nil
     // Optional fields keep earlier review archives readable without a data migration.
     var evidence: [FocusSession]? = nil
+    var activityEvidence: [ActivitySegment]? = nil
     var messages: [ReviewMessage]? = nil
     var state: ReviewState? = nil
     var error: String? = nil

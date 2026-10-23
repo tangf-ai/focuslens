@@ -7,7 +7,7 @@ private final class CountdownPanel: NSPanel {
 }
 
 /// A quiet, decreasing time rail. Drawing is limited to the small progress region.
-private final class RemainingTimeRail: NSView {
+final class RemainingTimeRail: NSView {
     var fraction = 1.0 { didSet { if fraction != oldValue { needsDisplay = true } } }
     var tint = NSColor(red: 0.76, green: 0.31, blue: 0.19, alpha: 1) {
         didSet { if tint != oldValue { needsDisplay = true } }

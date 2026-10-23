@@ -16,6 +16,8 @@ struct SettingsWorkspace: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 PageTitle(title: "设置", subtitle: "调整专注周期，连接你使用的 AI 服务")
+                AutomaticSettings()
+                Rectangle().fill(Theme.line).frame(height: 1)
                 sectionTitle("专注与休息", symbol: "timer")
                 HStack(spacing: 35) {
                     durationField("默认专注", value: $focus, range: 5...180)
@@ -59,7 +61,7 @@ struct SettingsWorkspace: View {
                     if saved { Label("已保存", systemImage: "checkmark").font(.system(size: 12)).foregroundStyle(Theme.muted) }
                     Spacer()
                 }
-                Text("计时、统计和记录无需 AI 接口。只有你点击“生成复盘”时才会请求 AI；应用不在后台自动上传。")
+                Text("手动计时无需 AI 接口。自动记录仅在你授权并开启后发送前台窗口截图；复盘仍由你手动生成。")
                     .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5)
                 Rectangle().fill(Theme.line).frame(height: 1)
                 sectionTitle("本地数据", symbol: "externaldrive")
