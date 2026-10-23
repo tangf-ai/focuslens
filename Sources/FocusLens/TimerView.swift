@@ -73,7 +73,7 @@ struct TimerWorkspace: View {
         VStack(alignment: .leading, spacing: 10) {
             TextField("这一轮，准备完成什么？（选填）", text: $goal, axis: .vertical)
                 .textFieldStyle(.plain).font(.system(size: 14)).lineLimit(1...2)
-                .padding(11).background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 8))
+                .padding(11).background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line, lineWidth: 1))
                 .onChange(of: goal) { _, value in if value.count > 500 { goal = String(value.prefix(500)) } }
                 .accessibilityLabel("本轮目标（选填）")
@@ -182,7 +182,7 @@ struct FeedbackView: View {
                     ForEach(Outcome.allCases) { item in
                         Button { outcome = item } label: {
                             Text(item.rawValue).font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity).padding(.vertical, 13)
-                                .foregroundStyle(outcome == item ? .white : Theme.ink)
+                                .foregroundStyle(outcome == item ? Theme.accentInk : Theme.ink)
                                 .background(outcome == item ? Theme.accent : Theme.line.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
                         }.buttonStyle(.plain)
                     }
@@ -199,7 +199,7 @@ struct FeedbackView: View {
                 }
             }
             TextField("有什么进展或干扰？（选填）", text: $note, axis: .vertical).lineLimit(3...4)
-                .textFieldStyle(.plain).padding(13).background(.white, in: RoundedRectangle(cornerRadius: 8))
+                .textFieldStyle(.plain).padding(13).background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line))
                 .onChange(of: note) { _, value in if value.count > 1000 { note = String(value.prefix(1000)) } }
             HStack {

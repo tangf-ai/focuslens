@@ -156,7 +156,7 @@ struct ReviewView: View {
             HStack(alignment: .bottom, spacing: 10) {
                 TextField("继续提问，例如：下一轮该怎么安排？", text: $question, axis: .vertical)
                     .textFieldStyle(.plain).font(.system(size: 13)).lineLimit(1...3)
-                    .padding(11).background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 8))
+                    .padding(11).background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line, lineWidth: 1))
                     .onChange(of: question) { _, value in if value.count > 2000 { question = String(value.prefix(2000)) } }
                     .accessibilityLabel("复盘追问")

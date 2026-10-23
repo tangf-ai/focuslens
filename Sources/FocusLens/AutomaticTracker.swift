@@ -4,6 +4,7 @@ import CryptoKit
 
 @MainActor
 final class AutomaticTracker: ObservableObject {
+    let appearance: AppearanceStore
     @Published private(set) var config = AutomaticConfig()
     @Published private(set) var status: AutomaticStatus = .off
     @Published private(set) var ledger = ActivityLedger()
@@ -81,12 +82,14 @@ final class AutomaticTracker: ObservableObject {
     private var recordsDirectory: URL { directory.appendingPathComponent("automatic-activities", isDirectory: true) }
 
     init(directory: URL, startClock: Bool = true,
+         appearance: AppearanceStore? = nil,
          permission: @escaping () -> Bool = { MemoryScreenCapture.allowed },
          sessionAvailable: @escaping () -> Bool = { MemoryScreenCapture.sessionAvailable },
          foreground: @escaping () -> ForegroundContext? = { ForegroundContext.current() },
          capture: @escaping (ForegroundContext) async throws -> MemoryScreenCapture.Frame = { try await MemoryScreenCapture.capture($0) },
          analyze: @escaping (Data, AISettings, String?) async throws -> ActivityClassification = { try await VisionService.classify(image: $0, settings: $1, key: $2) }) {
         self.directory = directory; self.clockEnabled = startClock
+        self.appearance = appearance ?? AppearanceStore(directory: directory)
         self.keyScope = "vision:" + directory.standardizedFileURL.path
         self.permission = permission; self.sessionAvailable = sessionAvailable; self.foreground = foreground; self.capture = capture; self.analyze = analyze
         load()

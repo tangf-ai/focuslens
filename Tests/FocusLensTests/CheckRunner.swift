@@ -63,7 +63,11 @@ struct CheckRunner {
             ("左侧竖屏与拔屏后浮窗恢复", tests.testPortraitDisplayAndRemovedDisplayRecovery),
             ("浮窗跨屏面积选择与点坐标", tests.testPanelPlacementUsesDominantDisplayAndPoints),
             ("多屏前台窗口选择与断屏过滤", tests.testCaptureSelectsFrontWindowAcrossDisplays),
-            ("多屏截图过滤其他应用与覆盖窗口", tests.testCaptureSkipsUnrelatedOverlayAndHiddenWindows)
+            ("多屏截图过滤其他应用与覆盖窗口", tests.testCaptureSkipsUnrelatedOverlayAndHiddenWindows),
+            ("外观默认值持久化与配置隔离", tests.testAppearanceDefaultsPersistenceAndIsolation),
+            ("外观损坏保护与主题观察更新", tests.testAppearanceCorruptionAndObservation),
+            ("动画节能策略与主题文字对比度", tests.testDecorativeMotionPolicyAndThemeContrast),
+            ("浮窗主题布局与冻结状态", tests.testFloatingAppearanceLayoutsAndFrozenMotion)
         ]
         for (name, check) in checks {
             let before = failureCount
@@ -83,6 +87,7 @@ struct CheckRunner {
         catch { fail("\(error)", file: #filePath, line: #line) }
         print("\(beforeDeadline == failureCount ? "PASS" : "FAIL") 无界面刷新仍按期完成")
         let streamingChecks: [(String, () async throws -> Void)] = [
+            ("浮窗主题联动与结束后目标保留", tests.testFloatingControllerKeepsGoalAtFeedbackAndAppearanceChange),
             ("真实HTTP流式传输和异常", tests.testRealStreamingTransportAndFailures),
             ("流式取消保留已收文字", tests.testStreamingCancellationRetainsText),
             ("多轮追问快照与保存恢复", tests.testStoreStreamingConversationPersistence),

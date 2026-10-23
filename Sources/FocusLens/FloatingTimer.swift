@@ -8,6 +8,8 @@ private final class CountdownPanel: NSPanel {
 
 /// A quiet, decreasing time rail. Drawing is limited to the small progress region.
 final class RemainingTimeRail: NSView {
+    var trackColor = NSColor.gray.withAlphaComponent(0.12) { didSet { if trackColor != oldValue { needsDisplay = true } } }
+    var tickColor = NSColor.gray.withAlphaComponent(0.35) { didSet { if tickColor != oldValue { needsDisplay = true } } }
     var fraction = 1.0 { didSet { if fraction != oldValue { needsDisplay = true } } }
     var tint = NSColor(red: 0.76, green: 0.31, blue: 0.19, alpha: 1) {
         didSet { if tint != oldValue { needsDisplay = true } }
@@ -15,7 +17,7 @@ final class RemainingTimeRail: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let track = NSRect(x: 4, y: 11, width: max(0, bounds.width - 8), height: 6)
-        NSColor(red: 0.89, green: 0.90, blue: 0.87, alpha: 1).setFill()
+        trackColor.setFill()
         NSBezierPath(roundedRect: track, xRadius: 3, yRadius: 3).fill()
         let width = track.width * min(1, max(0, fraction))
         if width > 0 {
@@ -24,7 +26,7 @@ final class RemainingTimeRail: NSView {
             NSBezierPath(roundedRect: fill, xRadius: min(3, width / 2), yRadius: 3).fill()
             NSBezierPath(ovalIn: NSRect(x: track.minX + width - 4, y: track.midY - 4, width: 8, height: 8)).fill()
         }
-        NSColor(red: 0.80, green: 0.82, blue: 0.79, alpha: 1).setStroke()
+        tickColor.setStroke()
         for index in 0...4 {
             let x = track.minX + track.width * Double(index) / 4
             let tick = NSBezierPath()
@@ -36,311 +38,117 @@ final class RemainingTimeRail: NSView {
     }
 }
 
-/// A small AppKit panel updates its text directly, without publishing per-second app state.
 @MainActor
 final class FloatingTimerController: NSObject {
     static let identifier = NSUserInterfaceItemIdentifier("FocusLensFloatingTimer")
     private weak var store: FocusStore?
     private var panel: CountdownPanel?
-    private let timeLabel = NSTextField(labelWithString: "25:00")
-    private let statusLabel = NSTextField(labelWithString: "专注中")
-    private let goalLabel = NSTextField(labelWithString: "")
-    private let pauseButton = NSButton()
-    private let planLabel = NSTextField(labelWithString: "25 分钟")
-    private let progressLabel = NSTextField(labelWithString: "剩余时间")
-    private let percentLabel = NSTextField(labelWithString: "100%")
-    private let progressRail = RemainingTimeRail()
-    private let statusDot = NSView()
-    private var goalRowHeight: CGFloat = 0
-    private var panelSize: NSSize { NSSize(width: 320, height: 168 + goalRowHeight) }
-    private var upperViews: [NSView] = []
-    private var focusKind: TaskKind?
-    private var focusGoal = ""
+    private let content = FocusFloatingContent()
     private var observation: AnyCancellable?
-    private var visibilityObserver: NSObjectProtocol?
+    private var observers: [NSObjectProtocol] = []
     private var screenSupport: FloatingScreenSupport?
-    private var displayTimer: Timer?
+    private var timer: Timer?
     private var currentRun: TimerRun?
+    private var pendingFeedback: SessionDraft?
     private var runID: UUID?
-    private var hasFeedback = false
-    private var restFinished = false
-    private var dismissed = false
-    private let accent = NSColor(red: 0.76, green: 0.31, blue: 0.19, alpha: 1)
-    private let ink = NSColor(red: 0.16, green: 0.18, blue: 0.17, alpha: 1)
-    private let muted = NSColor(red: 0.43, green: 0.45, blue: 0.43, alpha: 1)
+    private var hasFeedback = false, restFinished = false, dismissed = false
 
     init(store: FocusStore) {
-        self.store = store
-        super.init()
+        self.store = store; super.init()
+        content.edit.isHidden = true
+        for (button, action) in [(content.pause, #selector(togglePause)), (content.open, #selector(openMain)), (content.close, #selector(hide))] {
+            button.target = self; button.action = action
+        }
         observation = store.$data.sink { [weak self] data in self?.update(data) }
+        observers.append(NotificationCenter.default.addObserver(forName: .focusLensAppearanceChanged, object: store.appearance, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        })
     }
-
-    deinit {
-        displayTimer?.invalidate()
-        if let visibilityObserver { NotificationCenter.default.removeObserver(visibilityObserver) }
-    }
-
+    deinit { timer?.invalidate(); for token in observers { NotificationCenter.default.removeObserver(token) } }
     func present() {
         guard currentRun != nil || hasFeedback || restFinished else { return }
-        dismissed = false
-        showPanel()
-        screenSupport?.ensureVisible()
+        dismissed = false; refresh(); screenSupport?.ensureVisible()
     }
-
     func moveToCurrentScreen() {
         guard currentRun != nil || hasFeedback || restFinished else { return }
         present(); screenSupport?.moveToCurrentScreen()
     }
-
     private func update(_ data: AppData) {
-        let previousRun = currentRun
-        currentRun = data.activeRun
-        hasFeedback = data.pendingFeedback != nil
-        if let run = currentRun {
-            focusKind = run.phase == .focus ? run.kind : nil
-            focusGoal = run.phase == .focus ? run.goal : ""
-        } else {
-            focusKind = data.pendingFeedback?.kind
-            focusGoal = data.pendingFeedback?.goal ?? ""
-        }
+        let previous = currentRun; currentRun = data.activeRun; pendingFeedback = data.pendingFeedback; hasFeedback = pendingFeedback != nil
         if let run = currentRun {
             if run.id != runID { dismissed = false }
-            runID = run.id
-            restFinished = false
-        } else if previousRun?.phase == .rest {
-            restFinished = true
-        }
-        guard currentRun != nil || hasFeedback || restFinished else {
-            hidePanel()
-            runID = nil
-            return
-        }
-        refreshText()
-        if !dismissed { showPanel() }
-        configureDisplayTimer()
+            runID = run.id; restFinished = false
+        } else if previous?.phase == .rest { restFinished = true }
+        refresh()
     }
-
     private func makePanel() -> CountdownPanel {
-        let panel = CountdownPanel(contentRect: NSRect(origin: .zero, size: panelSize),
-                                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.identifier = Self.identifier
-        panel.title = "专注镜 · 倒计时浮窗"
-        panel.level = .floating
-        panel.isFloatingPanel = true
-        panel.hidesOnDeactivate = false
-        panel.becomesKeyOnlyIfNeeded = true
+        let panel = CountdownPanel(contentRect: NSRect(origin: .zero, size: content.desiredSize), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.identifier = Self.identifier; panel.title = "专注镜 · 倒计时浮窗"
+        panel.level = .floating; panel.isFloatingPanel = true; panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true; panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        panel.isMovableByWindowBackground = true
-        panel.isExcludedFromWindowsMenu = true
-        panel.isReleasedWhenClosed = false
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.appearance = NSAppearance(named: .aqua)
-
-        let content = NSView(frame: NSRect(origin: .zero, size: panelSize))
-        content.wantsLayer = true
-        content.layer?.cornerRadius = 20
-        content.layer?.backgroundColor = NSColor(red: 0.985, green: 0.98, blue: 0.965, alpha: 1).cgColor
-        content.layer?.borderColor = NSColor(red: 0.88, green: 0.89, blue: 0.86, alpha: 1).cgColor
-        content.layer?.borderWidth = 0.75
-        panel.contentView = content
-
-        statusDot.frame = NSRect(x: 21, y: 143, width: 7, height: 7)
-        statusDot.wantsLayer = true
-        statusDot.layer?.cornerRadius = 3.5
-        statusDot.layer?.backgroundColor = accent.cgColor
-        statusDot.setAccessibilityElement(false)
-        statusLabel.frame = NSRect(x: 34, y: 137, width: 160, height: 18)
-        statusLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        statusLabel.textColor = muted
-        statusLabel.maximumNumberOfLines = 1
-        statusLabel.cell?.lineBreakMode = .byTruncatingTail
-        goalLabel.frame = NSRect(x: 20, y: 65, width: 280, height: 22)
-        goalLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        goalLabel.textColor = ink
-        goalLabel.maximumNumberOfLines = 1
-        goalLabel.cell?.lineBreakMode = .byTruncatingTail
-        goalLabel.isHidden = true
-        goalLabel.setAccessibilityLabel("本轮目标")
-        planLabel.frame = NSRect(x: 202, y: 138, width: 76, height: 16)
-        planLabel.font = .systemFont(ofSize: 10, weight: .regular)
-        planLabel.textColor = muted
-        planLabel.alignment = .right
-        timeLabel.frame = NSRect(x: 18, y: 65, width: 201, height: 63)
-        timeLabel.font = .monospacedDigitSystemFont(ofSize: 50, weight: .light)
-        timeLabel.textColor = ink
-        progressLabel.frame = NSRect(x: 20, y: 42, width: 190, height: 16)
-        progressLabel.font = .systemFont(ofSize: 10, weight: .regular)
-        progressLabel.textColor = muted
-        percentLabel.frame = NSRect(x: 224, y: 42, width: 76, height: 16)
-        percentLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        percentLabel.textColor = muted
-        percentLabel.alignment = .right
-        progressRail.frame = NSRect(x: 20, y: 16, width: 280, height: 20)
-        progressRail.setAccessibilityElement(true)
-        progressRail.setAccessibilityRole(.progressIndicator)
-        progressRail.setAccessibilityLabel("剩余时间比例")
-        progressRail.setAccessibilityValue(percentLabel.stringValue)
-        for view in [statusDot, statusLabel, goalLabel, planLabel, timeLabel, progressLabel, percentLabel, progressRail] {
-            content.addSubview(view)
+        panel.isExcludedFromWindowsMenu = true; panel.isReleasedWhenClosed = false
+        panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true; panel.contentView = content
+        let restored = panel.setFrameUsingName("FocusLensFloatingTimer"), previous = panel.frame
+        panel.setContentSize(content.desiredSize)
+        if let screen = FloatingScreenSupport.currentScreen {
+            let proposed = restored ? NSRect(x: previous.maxX - content.desiredSize.width, y: previous.maxY - content.desiredSize.height, width: content.desiredSize.width, height: content.desiredSize.height)
+                : FloatingPlacement.topRight(size: content.desiredSize, in: screen.visibleFrame)
+            panel.setFrame(FloatingPlacement.recover(proposed, screens: NSScreen.screens.map(\.visibleFrame), preferred: screen.visibleFrame), display: false)
         }
-
-        configure(pauseButton, symbol: "pause.fill", tooltip: "暂停", action: #selector(togglePause),
-                  frame: NSRect(x: 226, y: 80, width: 32, height: 32))
-        styleAction(pauseButton)
-        content.addSubview(pauseButton)
-        let openButton = NSButton()
-        configure(openButton, symbol: "arrow.up.right", tooltip: "返回主窗口", action: #selector(openMainWindow),
-                  frame: NSRect(x: 268, y: 80, width: 32, height: 32))
-        styleAction(openButton)
-        content.addSubview(openButton)
-        let closeButton = NSButton()
-        configure(closeButton, symbol: "xmark", tooltip: "隐藏浮窗（继续计时）", action: #selector(dismiss),
-                  frame: NSRect(x: 287, y: 136, width: 19, height: 19))
-        closeButton.alphaValue = 0.6
-        content.addSubview(closeButton)
-        upperViews = [statusDot, statusLabel, planLabel, timeLabel, pauseButton, openButton, closeButton]
-
-        let restored = panel.setFrameUsingName("FocusLensFloatingTimer")
-        if restored {
-            let oldFrame = panel.frame
-            panel.setContentSize(panelSize)
-            panel.setFrameOrigin(NSPoint(x: oldFrame.maxX - panelSize.width, y: oldFrame.maxY - panelSize.height))
-        }
-        let screen = FloatingScreenSupport.currentScreen
-        if let available = screen?.visibleFrame {
-            let proposed = restored ? panel.frame : FloatingPlacement.topRight(size: panelSize, in: available)
-            panel.setFrame(FloatingPlacement.recover(proposed, screens: NSScreen.screens.map(\.visibleFrame),
-                                                     preferred: available), display: false)
-        }
-        panel.setFrameAutosaveName("FocusLensFloatingTimer")
-        screenSupport = FloatingScreenSupport(panel: panel)
-        visibilityObserver = NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
-            object: panel, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.refreshText()
-                    self?.configureDisplayTimer()
-                }
-            }
+        panel.setFrameAutosaveName("FocusLensFloatingTimer"); screenSupport = FloatingScreenSupport(panel: panel)
+        observers.append(NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: panel, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.configureClockAndMotion() }
+        })
         return panel
     }
-
-    private func configure(_ button: NSButton, symbol: String, tooltip: String, action: Selector, frame: NSRect) {
-        button.frame = frame
-        button.title = ""
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
-        button.imagePosition = .imageOnly
-        button.isBordered = false
-        button.setButtonType(.momentaryChange)
-        button.contentTintColor = muted
-        button.toolTip = tooltip
-        button.setAccessibilityLabel(tooltip)
-        button.target = self
-        button.action = action
-    }
-
-    private func styleAction(_ button: NSButton) {
-        button.wantsLayer = true
-        button.layer?.cornerRadius = 16
-        button.layer?.backgroundColor = NSColor(red: 0.925, green: 0.93, blue: 0.91, alpha: 1).cgColor
-        button.contentTintColor = ink
-        if let image = button.image {
-            button.image = image.withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+    private func refresh() {
+        guard let store else { return }
+        guard currentRun != nil || hasFeedback || restFinished else {
+            runID = nil; panel?.orderOut(nil); configureClockAndMotion(); return
         }
-    }
-
-    private func showPanel() {
         if panel == nil { panel = makePanel() }
-        refreshText()
-        if panel?.isVisible != true { screenSupport?.ensureVisible(); panel?.orderFrontRegardless() }
-        configureDisplayTimer()
-    }
-
-    private func hidePanel() {
-        displayTimer?.invalidate()
-        displayTimer = nil
-        panel?.orderOut(nil)
-    }
-
-    private func configureDisplayTimer() {
-        displayTimer?.invalidate()
-        displayTimer = nil
-        guard let run = currentRun, !run.isPaused, !dismissed,
-              let panel, panel.isVisible, panel.occlusionState.contains(.visible) else { return }
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.refreshTime() }
+        let focus = currentRun?.phase == .focus || hasFeedback
+        let kind = currentRun?.phase == .focus ? currentRun?.kind : pendingFeedback?.kind
+        let goal = currentRun?.phase == .focus ? currentRun?.goal ?? "" : pendingFeedback?.goal ?? ""
+        content.status.stringValue = currentRun.map { $0.isPaused ? "已暂停" : ($0.phase == .focus ? "专注中" : "休息中") } ?? (hasFeedback ? "专注结束" : "休息结束")
+        if let kind, focus { content.status.stringValue += " · " + kind.displayName }
+        content.status.toolTip = content.status.stringValue
+        content.title.stringValue = focus ? goal.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ") : ""
+        content.title.toolTip = goal.isEmpty ? nil : goal
+        content.detail.stringValue = currentRun.map { "计划 \(Int($0.plannedSeconds / 60)) 分钟" } ?? (hasFeedback ? "待填写反馈" : "本轮已结束")
+        content.daily.stringValue = focus ? "手动专注" : "休息时间"
+        content.pause.isHidden = currentRun == nil; content.pause.title = currentRun?.isPaused == true ? "继续" : "暂停"
+        panel?.appearance = NSAppearance(named: store.appearance.preferences.theme.isDark ? .darkAqua : .aqua)
+        content.apply(appearance: store.appearance, active: false, visible: false)
+        if let panel, panel.frame.size != content.desiredSize {
+            let old = panel.frame; panel.setContentSize(content.desiredSize)
+            panel.setFrameOrigin(NSPoint(x: old.maxX - content.desiredSize.width, y: old.maxY - content.desiredSize.height))
+            screenSupport?.ensureVisible()
         }
-        timer.tolerance = 0.15
-        RunLoop.main.add(timer, forMode: .common)
-        displayTimer = timer
+        content.needsLayout = true; content.layoutSubtreeIfNeeded(); refreshTime()
+        if !dismissed, panel?.isVisible != true { screenSupport?.ensureVisible(); panel?.orderFrontRegardless() }
+        configureClockAndMotion()
     }
-
     private func refreshTime() {
-        let now = Date()
-        let remaining = currentRun.map { $0.remaining(at: now) } ?? 0
-        let text = clockText(remaining)
-        if timeLabel.stringValue != text { timeLabel.stringValue = text }
-        let fraction = currentRun.map { min(1, max(0, remaining / $0.plannedSeconds)) } ?? 0
-        progressRail.fraction = fraction
-        let percentage = "\(Int(ceil(fraction * 100)))%"
-        if percentLabel.stringValue != percentage {
-            percentLabel.stringValue = percentage
-            progressRail.setAccessibilityValue(percentage)
-        }
+        let remaining = currentRun?.remaining(at: Date()) ?? 0
+        content.time.stringValue = clockText(remaining)
+        content.caption.stringValue = currentRun == nil ? "本轮已结束" : "本轮剩余时间"
+        let fraction = currentRun.map { remaining / $0.plannedSeconds } ?? 0
+        content.progressText.stringValue = currentRun == nil ? "本轮已结束" : "剩余 \(Int(ceil(min(1, max(0, fraction)) * 100)))%"
+        content.setProgress(fraction, visible: true)
     }
-
-    private func refreshText() {
-        refreshTime()
-        if let run = currentRun {
-            statusLabel.stringValue = run.isPaused ? "已暂停" : (run.phase == .focus ? "专注中" : "休息中")
-            planLabel.stringValue = "\(Int(run.plannedSeconds / 60)) 分钟"
-            progressLabel.stringValue = "剩余时间"
-            timeLabel.textColor = run.isPaused ? muted : ink
-            progressRail.tint = run.isPaused ? NSColor(red: 0.66, green: 0.69, blue: 0.64, alpha: 1) : accent
-            statusDot.layer?.backgroundColor = (run.isPaused ? muted : accent).cgColor
-            pauseButton.isHidden = false
-            let title = run.isPaused ? "继续" : "暂停"
-            pauseButton.image = NSImage(systemSymbolName: run.isPaused ? "play.fill" : "pause.fill", accessibilityDescription: title)?
-                .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
-            pauseButton.toolTip = title
-            pauseButton.setAccessibilityLabel(title)
-        } else {
-            statusLabel.stringValue = hasFeedback ? "专注结束" : "休息结束"
-            planLabel.stringValue = hasFeedback ? "待填写反馈" : "已结束"
-            progressLabel.stringValue = "本轮已结束"
-            timeLabel.textColor = accent
-            progressRail.tint = accent
-            statusDot.layer?.backgroundColor = accent.cgColor
-            pauseButton.isHidden = true
-        }
-        if let kind = focusKind {
-            statusLabel.stringValue += " · \(kind.displayName)"
-        }
-        statusLabel.toolTip = statusLabel.stringValue
-        let goal = focusGoal.trimmingCharacters(in: .whitespacesAndNewlines)
-        goalLabel.stringValue = goal.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        goalLabel.toolTip = goal.isEmpty ? nil : goal
-        goalLabel.isHidden = goal.isEmpty
-        resizeForGoal(visible: !goal.isEmpty)
+    private func configureClockAndMotion() {
+        timer?.invalidate(); timer = nil
+        guard let store else { return }
+        let visible = panel?.isVisible == true && panel?.occlusionState.contains(.visible) == true && !dismissed
+        let running = currentRun != nil && currentRun?.isPaused != true
+        content.apply(appearance: store.appearance, active: running, visible: visible)
+        guard visible, running else { return }
+        let tick = Timer(timeInterval: 1, repeats: true) { [weak self] _ in Task { @MainActor in self?.refreshTime() } }
+        tick.tolerance = 0.15; RunLoop.main.add(tick, forMode: .common); timer = tick
     }
-
-    /// Only a state change relays out the panel; the per-second refresh stays text-only.
-    private func resizeForGoal(visible: Bool) {
-        guard let panel else { return }
-        let height: CGFloat = visible ? 32 : 0
-        guard height != goalRowHeight else { return }
-        let offset = height - goalRowHeight
-        goalRowHeight = height
-        let oldFrame = panel.frame
-        panel.setContentSize(panelSize)
-        for view in upperViews { view.frame.origin.y += offset }
-        let bottom = panel.screen?.visibleFrame.minY ?? oldFrame.minY
-        panel.setFrameOrigin(NSPoint(x: oldFrame.minX, y: max(bottom + 12, oldFrame.maxY - panelSize.height)))
-        screenSupport?.ensureVisible()
-    }
-
     @objc private func togglePause() { store?.togglePause() }
-    @objc private func openMainWindow() { store?.restoreMainWindow() }
-    @objc private func dismiss() { dismissed = true; hidePanel() }
+    @objc private func openMain() { store?.restoreMainWindow() }
+    @objc private func hide() { dismissed = true; panel?.orderOut(nil); configureClockAndMotion() }
 }

@@ -5,7 +5,6 @@ import AppKit
 struct FocusLensApp: App {
     @StateObject private var store: FocusStore
     init() {
-        NSApplication.shared.appearance = NSAppearance(named: .aqua)
         let args = ProcessInfo.processInfo.arguments
         var directory: URL?
         if let index = args.firstIndex(of: "--data-directory"), index + 1 < args.count {
@@ -17,7 +16,7 @@ struct FocusLensApp: App {
         WindowGroup("专注镜", id: "main") {
             RootView().environmentObject(store).frame(minWidth: 860, minHeight: 620)
                 .environmentObject(store.automatic)
-                .preferredColorScheme(.light)
+                .preferredColorScheme(store.appearance.preferences.theme.isDark ? .dark : .light)
                 .tint(Theme.accent)
                 .environment(\.locale, Locale(identifier: "zh_CN"))
         }
@@ -47,17 +46,8 @@ struct FocusLensApp: App {
     }
 }
 
-enum Theme {
-    static let accent = Color(red: 0.76, green: 0.31, blue: 0.19)
-    static let background = Color(red: 0.98, green: 0.97, blue: 0.95)
-    static let ink = Color(red: 0.16, green: 0.18, blue: 0.17)
-    static let muted = Color(red: 0.43, green: 0.45, blue: 0.43)
-    static let line = Color(red: 0.87, green: 0.87, blue: 0.84)
-    static let sidebar = Color(red: 0.95, green: 0.95, blue: 0.93)
-}
-
 enum Destination: String, CaseIterable, Identifiable {
-    case automatic = "自动记录", activity = "活动时间线", insights = "本周统计", review = "AI 复盘", timer = "手动计时", history = "专注记录", settings = "设置"
+    case automatic = "自动记录", activity = "活动时间线", insights = "本周统计", review = "AI 复盘", timer = "手动计时", history = "专注记录", appearance = "外观与浮窗", settings = "设置"
     var id: String { rawValue }
     var symbol: String {
         switch self {
@@ -68,6 +58,7 @@ enum Destination: String, CaseIterable, Identifiable {
         case .history: "clock.arrow.circlepath"
         case .review: "sparkles"
         case .settings: "slider.horizontal.3"
+        case .appearance: "paintpalette"
         }
     }
 }
@@ -95,6 +86,7 @@ struct RootView: View {
                 case .history: HistoryView()
                 case .review: ReviewView(stream: store.reviewStream, onSettings: { selection = .settings })
                 case .settings: SettingsWorkspace()
+                case .appearance: AppearanceWorkspace()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -128,7 +120,7 @@ struct RootView: View {
                     Text("FOCUS LENS").font(.system(size: 9, weight: .medium, design: .monospaced)).tracking(2.2).foregroundStyle(Theme.muted)
                 }
             }
-            .padding(.top, 32).padding(.bottom, 28)
+            .padding(.top, 26).padding(.bottom, 22)
             ForEach(Destination.allCases) { item in
                 Button {
                     selection = item
@@ -140,7 +132,7 @@ struct RootView: View {
                         if item == .timer, store.data.activeRun != nil { Circle().fill(Theme.accent).frame(width: 6, height: 6) }
                     }
                     .foregroundStyle(selection == item ? Theme.accent : Theme.muted)
-                    .padding(.horizontal, 12).padding(.vertical, 10)
+                    .padding(.horizontal, 12).padding(.vertical, 9)
                     .background(selection == item ? Theme.accent.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 8))
                     .contentShape(Rectangle())
                 }
@@ -176,7 +168,7 @@ struct PageTitle: View {
 struct AccentButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label.font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+        configuration.label.font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.accentInk)
             .padding(.horizontal, 28).padding(.vertical, 13)
             .background(Theme.accent.opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.35), in: Capsule())
             .scaleEffect(configuration.isPressed ? 0.98 : 1)

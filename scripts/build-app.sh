@@ -18,8 +18,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>com.focuslens.mac</string>
 <key>CFBundleExecutable</key><string>FocusLens</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.2</string>
-<key>CFBundleVersion</key><string>12</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleVersion</key><string>13</string>
 <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
 <key>CFBundleLocalizations</key><array><string>zh_CN</string></array>
 <key>CFBundleIconFile</key><string>AppIcon</string>

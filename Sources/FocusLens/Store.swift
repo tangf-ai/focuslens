@@ -21,12 +21,13 @@ final class FocusStore: ObservableObject {
     @Published var keyAvailable = false
     @Published private(set) var hasVisibleWindow = true
     let directory: URL
+    let appearance: AppearanceStore
     var openMainWindowAction: (() -> Void)?
     private var floatingTimer: FloatingTimerController?
     private var automaticInstance: AutomaticTracker?
     var automatic: AutomaticTracker {
         if let automaticInstance { return automaticInstance }
-        let tracker = AutomaticTracker(directory: directory, startClock: clockEnabled)
+        let tracker = AutomaticTracker(directory: directory, startClock: clockEnabled, appearance: appearance)
         tracker.setManualBlocked(data.activeRun != nil || data.pendingFeedback != nil)
         automaticInstance = tracker
         return tracker
@@ -51,6 +52,7 @@ final class FocusStore: ObservableObject {
         self.aiKeyProvider = aiKeyProvider ?? { try Keychain.read(scope: scope) }
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("FocusLens", isDirectory: true)
+        appearance = AppearanceStore(directory: self.directory)
         load()
         keyAvailable = (try? Keychain.read(scope: keychainScope))?.isEmpty == false
         tick()
