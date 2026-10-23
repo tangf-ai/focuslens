@@ -113,12 +113,11 @@ final class ActivityFloatingController: NSObject {
         status.stringValue = tracker.status.label
         let segment = tracker.current == nil && tracker.status != .paused ? nil : tracker.liveSegment()
         let active: Bool
-        switch tracker.status { case .recording, .uncertain, .error, .recognizing: active = true; default: active = false }
+        switch tracker.status { case .recording, .uncertain, .error, .waiting, .recognizing: active = true; default: active = false }
         title.stringValue = active ? segment.map { "\($0.category.rawValue) · \($0.title)" } ?? "正在判断当前活动" : tracker.status.detail
         time.stringValue = (active || tracker.status == .paused) ? segment.map { "约 \(max(0, Int($0.seconds / 60))) 分钟" } ?? "—" : "—"
         if case .resting(let until) = tracker.status { time.stringValue = clockText(max(0, until.timeIntervalSinceNow)) }
-        detail.stringValue = tracker.lastIdentified.map { "最近识别 \(max(0, Int(Date().timeIntervalSince($0) / 60))) 分钟前" } ?? "等待首次识别"
-        if case .error(let message) = tracker.status { detail.stringValue = message }
+        detail.stringValue = tracker.recognitionDetail()
         if !active { detail.stringValue = "不截图、不分析" }
         let today = Period.today.interval()
         let seconds = tracker.segments(in: today).filter { $0.category == segment?.category }.reduce(0) { $0 + $1.seconds }
@@ -138,7 +137,10 @@ final class ActivityFloatingController: NSObject {
         for label in [title, detail, daily] { label.toolTip = label.stringValue }
         panel?.orderFrontRegardless()
         if panel?.occlusionState.contains(.visible) == true {
-            let interval: TimeInterval = { if case .resting = tracker.status { return 1 }; return 60 }()
+            let interval: TimeInterval = {
+                if case .resting = tracker.status { return 1 }
+                return active ? min(15, Double(tracker.config.intervalSeconds), tracker.isRecognizing ? 5 : 15) : 60
+            }()
             let tick = Timer(timeInterval: interval, repeats: false) { [weak self] _ in Task { @MainActor in self?.refresh() } }
             tick.tolerance = interval == 1 ? 0.1 : 5; RunLoop.main.add(tick, forMode: .common); timer = tick
         }

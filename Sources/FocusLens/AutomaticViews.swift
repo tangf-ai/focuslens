@@ -42,16 +42,15 @@ struct AutomaticHome: View {
                 }.frame(maxWidth: 510, alignment: .leading)
                 Spacer()
             } else {
-                TimelineView(.periodic(from: Date(), by: 60)) { context in
+                TimelineView(.periodic(from: Date(), by: 5)) { context in
                     let item = activity.liveSegment(at: context.date)
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 12) {
                             Label(activity.status.label, systemImage: "circle.fill").font(.system(size: 11)).foregroundStyle(Theme.accent)
                             Text(visibleTitle(item)).font(.system(size: 25, weight: .medium)).lineLimit(2)
-                            Text(activity.status.detail).font(.system(size: 11)).foregroundStyle(Theme.muted).lineLimit(3)
-                            if case .error = activity.status {
-                                Button("重新识别") { activity.retry() }.buttonStyle(.plain).foregroundStyle(Theme.accent)
-                            }
+                            Text(activity.recognitionDetail(at: context.date)).font(.system(size: 11)).foregroundStyle(Theme.muted).lineLimit(3)
+                            Button(activity.isRecognizing ? "正在更新…" : "立即更新") { activity.retry() }
+                                .buttonStyle(.plain).foregroundStyle(Theme.accent).disabled(!activity.canRefresh)
                             if !activity.hasPermission { Button("允许屏幕录制") { activity.requestPermission() }.buttonStyle(.plain).foregroundStyle(Theme.accent) }
                             if let item, activity.current != nil {
                                 Button("修改分类") { activity.edit(item) }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.accent)
@@ -80,21 +79,21 @@ struct AutomaticHome: View {
                 if records.isEmpty { Text("切换到工作窗口后开始识别；没有识别结果前，不推测具体活动。").font(.system(size: 12)).foregroundStyle(Theme.muted) }
                 ForEach(Array(records.prefix(3))) { ActivityRow(segment: $0) }
                 Spacer(minLength: 0)
-                Text("每 \(activity.config.intervalMinutes) 分钟识别 · 截图不保存 · 自动时长为估算")
+                Text("每 \(activity.config.intervalLabel)识别 · 切换应用提前更新 · 截图不保存 · 时长为估算")
                     .font(.system(size: 10)).foregroundStyle(Theme.muted)
             }
         }.padding(25)
     }
     private func visibleTitle(_ item: ActivitySegment?) -> String {
         switch activity.status {
-        case .recording, .uncertain, .recognizing, .error: return activity.current != nil ? item?.title ?? "正在判断当前活动" : "当前活动待确认"
+        case .recording, .uncertain, .waiting, .recognizing, .error: return activity.current != nil ? item?.title ?? "正在判断当前活动" : "当前活动待确认"
         case .paused: return item?.title ?? "自动记录已暂停"
         default: return activity.status.label
         }
     }
     private func visibleTime(_ item: ActivitySegment?) -> String {
         switch activity.status {
-        case .recording, .uncertain, .recognizing, .error: return activity.current != nil ? "约 \(Int((item?.seconds ?? 0) / 60)) 分钟" : "—"
+        case .recording, .uncertain, .waiting, .recognizing, .error: return activity.current != nil ? "约 \(Int((item?.seconds ?? 0) / 60)) 分钟" : "—"
         case .paused: return item.map { "约 \(Int($0.seconds / 60)) 分钟" } ?? "—"
         default: return "—"
         }
@@ -193,7 +192,7 @@ struct AutomaticSettings: View {
     @State private var draft = AutomaticConfig()
     @State private var key = ""
     @State private var removeKey = false
-    private var changed: Bool { draft.ai != activity.config.ai || draft.intervalMinutes != activity.config.intervalMinutes || draft.reminderMinutes != activity.config.reminderMinutes || draft.reminders != activity.config.reminders || draft.excludedApps != activity.config.excludedApps }
+    private var changed: Bool { draft.ai != activity.config.ai || draft.intervalSeconds != activity.config.intervalSeconds || draft.reminderMinutes != activity.config.reminderMinutes || draft.reminders != activity.config.reminders || draft.excludedApps != activity.config.excludedApps }
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
             Label("视觉模型与自动记录", systemImage: "scan.viewfinder").font(.system(size: 17, weight: .semibold))
@@ -212,9 +211,15 @@ struct AutomaticSettings: View {
                 Spacer()
             }
             HStack(spacing: 20) {
-                Picker("识别间隔", selection: $draft.intervalMinutes) { ForEach([1,2,3,5], id: \.self) { Text("每 \($0) 分钟").tag($0) } }.frame(width: 240)
-                Text("最多约 \(60 / max(1, draft.intervalMinutes)) 次 / 小时").font(.system(size: 11)).foregroundStyle(Theme.muted)
+                Picker("识别间隔", selection: $draft.intervalSeconds) {
+                    ForEach(AutomaticConfig.samplingIntervals, id: \.self) { seconds in
+                        Text(seconds < 60 ? "每 \(seconds) 秒" : "每 \(seconds / 60) 分钟").tag(seconds)
+                    }
+                }.frame(width: 240)
+                Text("常规最多约 \(3600 / draft.intervalSeconds) 次 / 小时").font(.system(size: 11)).foregroundStyle(Theme.muted)
             }
+            Text("本地模型可先选15秒，再按响应速度调到5或10秒。切换应用会提前更新，最快间隔5秒；慢请求不叠加，已有结果继续显示。")
+                .font(.system(size: 10)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
             Toggle("连续活动后在浮窗轻提示休息", isOn: $draft.reminders).font(.system(size: 12))
             Picker("提醒间隔", selection: $draft.reminderMinutes) { ForEach([25,30,45,60], id: \.self) { Text("\($0) 分钟").tag($0) } }.frame(width: 240)
             HStack { Text("不记录的应用").font(.system(size: 12)); Spacer(); Button("添加应用") { addApp() }.buttonStyle(.plain).foregroundStyle(Theme.accent) }

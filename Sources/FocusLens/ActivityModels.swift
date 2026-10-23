@@ -21,6 +21,26 @@ struct ActivitySegment: Codable, Identifiable, Equatable {
 struct AutomaticConfig: Codable, Equatable {
     var ai = AISettings()
     var intervalMinutes = 2
+    // Optional for compatibility with settings saved before second-based sampling.
+    var samplingSeconds: Int?
+    static let samplingIntervals = [5, 10, 15, 30, 60, 120, 180, 300]
+    var intervalSeconds: Int {
+        get {
+            if let samplingSeconds, Self.samplingIntervals.contains(samplingSeconds) { return samplingSeconds }
+            return [1,2,3,5].contains(intervalMinutes) ? intervalMinutes * 60 : 120
+        }
+        set {
+            samplingSeconds = Self.samplingIntervals.contains(newValue) ? newValue : 120
+            intervalMinutes = max(1, (samplingSeconds ?? 120) / 60)
+        }
+    }
+    var intervalLabel: String { intervalSeconds < 60 ? "\(intervalSeconds) 秒" : "\(intervalSeconds / 60) 分钟" }
+    var maximumObservationGap: TimeInterval { Double(max(180, intervalSeconds + 120)) }
+    func sampleDelay(sinceLastAttempt elapsed: TimeInterval?, appChanged: Bool = false) -> TimeInterval {
+        // App switches debounce briefly, without inheriting a multi-minute polling delay.
+        let spacing = appChanged ? min(5, intervalSeconds) : intervalSeconds
+        return max(appChanged ? 1.5 : 0.2, elapsed.map { Double(spacing) - max(0, $0) } ?? 0)
+    }
     var reminderMinutes = 25
     var reminders = true
     var enabled = false
@@ -89,7 +109,7 @@ struct ActivityLedger {
 }
 
 enum AutomaticStatus: Equatable {
-    case off, paused, away, manual, excluded(String), recognizing, recording, uncertain, error(String), resting(Date)
+    case off, paused, away, manual, excluded(String), waiting, recognizing, recording, uncertain, error(String), resting(Date)
     var label: String {
         switch self {
         case .off: "自动记录未启用"
@@ -97,6 +117,7 @@ enum AutomaticStatus: Equatable {
         case .away: "已离开电脑"
         case .manual: "手动计时期间暂挂"
         case .excluded: "此应用不记录"
+        case .waiting: "等待更新"
         case .recognizing: "识别中"
         case .recording: "自动记录中"
         case .uncertain: "活动待确认"
@@ -111,6 +132,7 @@ enum AutomaticStatus: Equatable {
         case .away: "锁屏或睡眠期间不记录，回来后重新识别。"
         case .manual: "保留手动计时，避免重复记录。"
         case .excluded(let name): "正在使用\(name)，离开后恢复识别。"
+        case .waiting: "当前窗口等待下一次采样，尚未发送识别请求。"
         case .recognizing: "等待新结果；显示的时间为自动估算。"
         case .recording: "根据间隔采样估算，不代表实际专注程度。"
         case .uncertain: "先保留时间，可以手动修正分类。"

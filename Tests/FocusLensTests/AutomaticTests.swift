@@ -2,6 +2,74 @@ import AppKit
 import Foundation
 
 extension FocusLensTests {
+    func testSecondSamplingCompatibilityAndCadence() throws {
+        let legacy = try JSONEncoder().encode(AutomaticConfig())
+        var config = try JSONDecoder().decode(AutomaticConfig.self, from: legacy)
+        XCTAssertEqual(config.intervalSeconds, 120)
+        config.intervalMinutes = 5
+        XCTAssertEqual(config.intervalSeconds, 300)
+        let signature = VisionService.signature(config)
+        config.intervalSeconds = 15
+        XCTAssertEqual(config.intervalLabel, "15 秒")
+        XCTAssertEqual(VisionService.signature(config), signature)
+        XCTAssertEqual(try JSONDecoder().decode(AutomaticConfig.self, from: JSONEncoder().encode(config)).intervalSeconds, 15)
+        XCTAssertEqual(config.sampleDelay(sinceLastAttempt: 4), 11)
+        XCTAssertEqual(config.sampleDelay(sinceLastAttempt: 20), 0.2)
+        config.intervalSeconds = 300
+        XCTAssertEqual(config.sampleDelay(sinceLastAttempt: 2, appChanged: true), 3)
+        XCTAssertEqual(config.sampleDelay(sinceLastAttempt: 20, appChanged: true), 1.5)
+        XCTAssertEqual(config.sampleDelay(sinceLastAttempt: 2), 298)
+        config.intervalSeconds = 0
+        XCTAssertEqual(config.intervalSeconds, 120)
+    }
+
+    @MainActor func testBackgroundRecognitionKeepsConfirmedActivity() async throws {
+        let directory = automaticDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+        var config = AutomaticConfig(); config.ai = AISettings(baseURL: "http://127.0.0.1/v1", model: "vision")
+        config.intervalSeconds = 15; config.enabled = true
+        config.verifiedSignature = VisionService.signature(config); config.consentSignature = config.verifiedSignature
+        try writeAutomatic(config, directory: directory)
+        var app = ForegroundContext(pid: 42, bundleID: "test.reader", name: "阅读器")
+        var captures = 0, calls = 0
+        let tracker = AutomaticTracker(directory: directory, startClock: false, permission: { true }, sessionAvailable: { true }, foreground: { app }, capture: { _ in
+            captures += 1
+            return MemoryScreenCapture.Frame(jpeg: Data([1]), fingerprint: Data([UInt8(captures)]), contextKey: "window", capturedAt: Date())
+        }, analyze: { _,_,_ in
+            calls += 1
+            try await Task.sleep(for: .milliseconds(70))
+            return ActivityClassification(category: .reading, title: "阅读文档")
+        })
+        tracker.reconcile()
+        XCTAssertEqual(tracker.status, .waiting)
+        XCTAssertFalse(tracker.isRecognizing); XCTAssertEqual(captures, 0)
+        tracker.sample()
+        XCTAssertEqual(tracker.status, .recognizing); XCTAssertTrue(tracker.isRecognizing)
+        try await Task.sleep(for: .milliseconds(140))
+        XCTAssertEqual(tracker.status, .recording); XCTAssertFalse(tracker.isRecognizing)
+        let id = tracker.current?.id
+        tracker.sample(); tracker.sample()
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(tracker.status, .recording)
+        XCTAssertTrue(tracker.isRecognizing)
+        XCTAssertEqual(tracker.current?.id, id)
+        XCTAssertEqual(tracker.current?.title, "阅读文档")
+        XCTAssertTrue(tracker.recognitionDetail().contains("后台更新"))
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertEqual(calls, 2); XCTAssertFalse(tracker.isRecognizing)
+        XCTAssertTrue(tracker.lastRecognitionDuration != nil)
+        app = ForegroundContext(pid: 43, bundleID: "test.editor", name: "编辑器")
+        tracker.reconcile()
+        XCTAssertEqual(tracker.status, .waiting)
+        XCTAssertEqual(tracker.current?.category, .unknown)
+        XCTAssertTrue(tracker.current?.title.contains("编辑器") == true)
+        XCTAssertFalse(tracker.recognitionDetail().contains("后台更新"))
+        let restored = AutomaticTracker(directory: directory, startClock: false)
+        XCTAssertEqual(restored.config.intervalSeconds, 15)
+        XCTAssertTrue(restored.config.enabled)
+        XCTAssertTrue(restored.verified)
+        tracker.shutdown()
+    }
+
     func testActivityLedgerBoundariesAndRestart() {
         let now = Date()
         var ledger = ActivityLedger()

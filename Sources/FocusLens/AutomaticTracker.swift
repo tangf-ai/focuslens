@@ -8,6 +8,9 @@ final class AutomaticTracker: ObservableObject {
     @Published private(set) var status: AutomaticStatus = .off
     @Published private(set) var ledger = ActivityLedger()
     @Published private(set) var lastIdentified: Date?
+    @Published private(set) var isRecognizing = false
+    @Published private(set) var recognitionStartedAt: Date?
+    @Published private(set) var lastRecognitionDuration: TimeInterval?
     @Published private(set) var testing = false
     @Published private(set) var testMessage = "尚未测试图片理解"
     @Published var errorMessage: String?
@@ -55,6 +58,24 @@ final class AutomaticTracker: ObservableObject {
     }
     var verified: Bool { config.verifiedSignature == VisionService.signature(config) }
     var hasPermission: Bool { permission() }
+    var canRefresh: Bool {
+        guard config.enabled, !isRecognizing else { return false }
+        switch status { case .recording, .uncertain, .waiting, .recognizing, .error: return true; default: return false }
+    }
+    func recognitionDetail(at date: Date = Date()) -> String {
+        if case .error(let message) = status { return message }
+        switch status { case .recording, .uncertain, .waiting, .recognizing: break; default: return status.detail }
+        if isRecognizing, let start = recognitionStartedAt {
+            let elapsed = max(0, Int(date.timeIntervalSince(start)))
+            return status == .recording ? "后台更新中 · 已用 \(elapsed) 秒" : "正在识别\(front?.name ?? "当前窗口") · 已用 \(elapsed) 秒"
+        }
+        if status == .waiting { return "\(front?.name ?? "当前窗口") · 稍后自动更新" }
+        guard let lastIdentified else { return status.detail }
+        let seconds = max(0, Int(date.timeIntervalSince(lastIdentified)))
+        let age = seconds < 60 ? "\(seconds) 秒前" : "\(seconds / 60) 分钟前"
+        let duration = lastRecognitionDuration.map { " · 耗时 " + String(format: "%.1f", $0) + " 秒" } ?? ""
+        return "最近识别 \(age)" + duration
+    }
     func visionAPIKey() throws -> String? { try Keychain.read(scope: keyScope) }
     private var configURL: URL { directory.appendingPathComponent("automatic-settings.json") }
     private var recordsDirectory: URL { directory.appendingPathComponent("automatic-activities", isDirectory: true) }
@@ -89,7 +110,7 @@ final class AutomaticTracker: ObservableObject {
     private func load() {
         do {
             if FileManager.default.fileExists(atPath: configURL.path) { config = try JSONDecoder().decode(AutomaticConfig.self, from: Data(contentsOf: configURL)) }
-            config.intervalMinutes = [1,2,3,5].contains(config.intervalMinutes) ? config.intervalMinutes : 2
+            config.intervalSeconds = config.intervalSeconds
             config.reminderMinutes = max(5, min(120, config.reminderMinutes))
             var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
             for offset in 0...8 {
@@ -103,7 +124,7 @@ final class AutomaticTracker: ObservableObject {
             }
             ledger.segments.sort { $0.start < $1.start }
             guard ledger.segments.allSatisfy({ $0.end >= $0.start }) else { throw AutomaticError.invalidResponse }
-            ledger.maximumGap = Double(config.intervalMinutes * 60 + 60)
+            ledger.maximumGap = config.maximumObservationGap
         } catch { writable = false; errorMessage = "自动记录文件读取失败，已停止自动记录写入。请先备份并检查自动记录文件。" }
     }
 
@@ -165,7 +186,7 @@ final class AutomaticTracker: ObservableObject {
             guard !draft.ai.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AutomaticError.missingModel }
             cancelWork()
             var updated = draft
-            updated.intervalMinutes = [1,2,3,5].contains(draft.intervalMinutes) ? draft.intervalMinutes : 2
+            updated.intervalSeconds = draft.intervalSeconds
             updated.ai.baseURL = draft.ai.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
             updated.ai.model = draft.ai.model.trimmingCharacters(in: .whitespacesAndNewlines)
             let keyUpdate = try VisionService.credentialUpdate(previous: config.ai, next: updated.ai, provided: newKey)
@@ -180,7 +201,7 @@ final class AutomaticTracker: ObservableObject {
                 keyAvailable = !key.isEmpty
             }
             config = updated
-            ledger.maximumGap = Double(config.intervalMinutes * 60 + 60)
+            ledger.maximumGap = config.maximumObservationGap
             testMessage = changedModel ? "配置已保存，需要重新测试图片理解并确认开启。" : (verified ? "图片理解测试通过" : "尚未测试图片理解")
             persist(); reconcile()
         } catch { errorMessage = error.localizedDescription }
@@ -271,6 +292,7 @@ final class AutomaticTracker: ObservableObject {
 
     private func cancelWork(at date: Date = Date()) {
         revision = UUID(); task?.cancel(); task = nil; timer?.invalidate(); timer = nil
+        isRecognizing = false; recognitionStartedAt = nil
         ledger.stop(at: date); storedDisplay = ledger.segments.max { $0.end < $1.end }; reminderVisible = false
         if config.enabled { persist() }
     }
@@ -324,12 +346,11 @@ final class AutomaticTracker: ObservableObject {
             status = blocked; floating?.refresh(); return
         }
         if ledger.currentID == nil, let app {
-            ledger.begin(ActivityClassification(category: .unknown, title: "等待识别当前活动"), app: app.name, bundleID: app.bundleID, at: Date())
-            status = .recognizing
+            ledger.begin(ActivityClassification(category: .unknown, title: "\(app.name) · 活动待确认"), app: app.name, bundleID: app.bundleID, at: Date())
+            status = .waiting
         }
         if task == nil && timer == nil {
-            let remaining = lastAttempt.map { Double(config.intervalMinutes * 60) - Date().timeIntervalSince($0) } ?? 0
-            schedule(after: max(changed ? 2 : 0.2, remaining))
+            schedule(after: config.sampleDelay(sinceLastAttempt: lastAttempt.map { Date().timeIntervalSince($0) }, appChanged: changed))
         }
         floating?.refresh()
     }
@@ -344,8 +365,10 @@ final class AutomaticTracker: ObservableObject {
     }
 
     func retry() {
-        guard case .error = status else { return }
-        lastAttempt = nil
+        guard canRefresh else { return }
+        if let lastAttempt, Date().timeIntervalSince(lastAttempt) < 5 {
+            schedule(after: max(0.2, 5 - Date().timeIntervalSince(lastAttempt))); return
+        }
         sample()
     }
 
@@ -360,11 +383,19 @@ final class AutomaticTracker: ObservableObject {
         let token = revision, settings = config.ai
         let key: String?
         do { key = try Keychain.read(scope: keyScope) } catch { status = .error(error.localizedDescription); return }
-        status = .recognizing
+        isRecognizing = true; recognitionStartedAt = Date()
+        if ledger.current?.category != .unknown, ledger.current != nil { status = .recording }
+        else { status = .recognizing }
         task = Task { [weak self] in
             guard let self else { return }
             defer {
-                if self.revision == token { self.task = nil; self.schedule(after: Double(self.config.intervalMinutes * 60)); self.floating?.refresh() }
+                if self.revision == token {
+                    self.task = nil; self.isRecognizing = false; self.recognitionStartedAt = nil
+                    // Cadence starts at capture, so inference time does not add another full interval.
+                    let elapsed = self.lastAttempt.map { Date().timeIntervalSince($0) }
+                    self.schedule(after: max(1, self.config.sampleDelay(sinceLastAttempt: elapsed)))
+                    self.floating?.refresh()
+                }
             }
             var sampledAt = Date()
             do {
@@ -376,14 +407,17 @@ final class AutomaticTracker: ObservableObject {
                    self.ledger.current?.category != .unknown {
                     self.ledger.checkpoint(at: Date()); self.status = .recording; self.updateReminder(); self.persist(); return
                 }
+                let started = Date()
                 let result = try await self.analyze(frame.jpeg, settings, key)
                 guard self.revision == token, self.foreground() == app, self.permission(), self.sessionAvailable(), !Task.isCancelled else { return }
+                self.lastRecognitionDuration = Date().timeIntervalSince(started)
                 if self.lastFrameKey != frame.contextKey { self.override = nil }
                 let classification = self.override?.key == frame.contextKey ? self.override!.value : result
                 if self.lastFrameKey == frame.contextKey, let current = self.ledger.current,
                    current.bundleID == app.bundleID, current.category == classification.category {
                     self.ledger.checkpoint(at: frame.capturedAt)
-                    self.ledger.describe(id: current.id, title: classification.title)
+                    if let continuing = self.ledger.current { self.ledger.describe(id: continuing.id, title: classification.title) }
+                    else { self.ledger.begin(classification, app: app.name, bundleID: app.bundleID, at: frame.capturedAt) }
                 } else { self.ledger.begin(classification, app: app.name, bundleID: app.bundleID, at: frame.capturedAt) }
                 self.ledger.checkpoint(at: Date())
                 self.lastFrameKey = frame.contextKey; self.lastFingerprint = frame.fingerprint; self.lastInputApp = app.bundleID
