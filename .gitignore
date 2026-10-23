@@ -16,6 +16,7 @@
 !.env.example
 focus-data.json
 automatic-settings.json
+automatic-idle-periods.json
 appearance-settings.json
 automatic-activities/
 *-export.json

@@ -2,6 +2,84 @@ import AppKit
 import Foundation
 
 extension FocusLensTests {
+    func testPersonalGuidanceCompatibilityAndRequest() throws {
+        // Real legacy shape: the new fields must be absent, not merely null.
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(AutomaticConfig())) as? [String: Any])
+        object.removeValue(forKey: "workBackground"); object.removeValue(forKey: "classificationRules")
+        var config = try JSONDecoder().decode(AutomaticConfig.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(config.workBackground); XCTAssertNil(config.classificationRules)
+        let signature = VisionService.signature(config)
+        config.workBackground = "  我从事软件开发\n"
+        config.classificationRules = "在 AI 工具里排查错误归为开发；阅读文档归为阅读。\n包含引号\"与换行"
+        config.normalizeGuidance()
+        XCTAssertEqual(config.workBackground, "我从事软件开发")
+        XCTAssertEqual(VisionService.signature(config), signature)
+        let restored = try JSONDecoder().decode(AutomaticConfig.self, from: JSONEncoder().encode(config))
+        XCTAssertEqual(restored, config)
+        let prompt = try VisionService.classificationPrompt(workBackground: config.workBackground, rules: config.classificationRules)
+        let body = try VisionService.payload(image: Data([1]), mime: "image/jpeg", prompt: prompt, model: "vision")
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try XCTUnwrap(request["messages"] as? [[String: Any]])
+        let parts = try XCTUnwrap(messages[1]["content"] as? [[String: Any]])
+        let sent = try XCTUnwrap(parts[0]["text"] as? String)
+        let lastLine = try XCTUnwrap(sent.components(separatedBy: "\n").last)
+        let guidance = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(lastLine.utf8)) as? [String: String])
+        XCTAssertEqual(guidance["工作背景"], config.workBackground)
+        XCTAssertEqual(guidance["分类习惯"], config.classificationRules)
+        XCTAssertTrue(sent.contains("画面证据不足时仍返回待确认"))
+        XCTAssertTrue(sent.contains("不能改变上述类别、JSON结构、隐私限制"))
+        XCTAssertEqual(try VisionService.classificationPrompt(workBackground: " \n", rules: ""), try VisionService.classificationPrompt())
+        config.workBackground = String(repeating: "背", count: 1200)
+        config.classificationRules = String(repeating: "规", count: 2500)
+        config.normalizeGuidance()
+        XCTAssertEqual(config.workBackground?.count, 1000); XCTAssertEqual(config.classificationRules?.count, 2000)
+        config.workBackground = "\n "; config.classificationRules = " "
+        config.normalizeGuidance()
+        XCTAssertNil(config.workBackground); XCTAssertNil(config.classificationRules)
+    }
+
+    @MainActor func testGuidanceSaveInvalidatesImageCacheAndCancelsOldResult() async throws {
+        let directory = automaticDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+        var config = AutomaticConfig(); config.ai = AISettings(baseURL: "http://127.0.0.1/v1", model: "vision")
+        config.enabled = true; config.verifiedSignature = VisionService.signature(config); config.consentSignature = config.verifiedSignature
+        try writeAutomatic(config, directory: directory)
+        let app = ForegroundContext(pid: 42, bundleID: "test.browser", name: "浏览器")
+        var received: [AutomaticConfig] = []
+        let tracker = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 }, permission: { true }, sessionAvailable: { true }, foreground: { app }, capture: { _ in
+            MemoryScreenCapture.Frame(jpeg: Data([1]), fingerprint: Data([1,2,3]), contextKey: "same-window", capturedAt: Date())
+        }, analyze: { _, config, _ in
+            received.append(config)
+            // Deliberately ignore cancellation to exercise the result revision guard.
+            try? await Task.sleep(for: .milliseconds(80))
+            return ActivityClassification(category: config.classificationRules == nil ? .reading : .development, title: config.classificationRules == nil ? "阅读文档" : "排查错误")
+        })
+        defer { tracker.shutdown() }
+        tracker.sample(); try await Task.sleep(for: .milliseconds(160))
+        XCTAssertEqual(tracker.current?.category, .reading)
+        tracker.sample(); try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(received.count, 1) // Unchanged image is skipped initially.
+        let history = tracker.ledger.segments
+        var draft = tracker.config; draft.workBackground = "  软件开发  "; draft.classificationRules = "AI 排错归开发"
+        XCTAssertTrue(tracker.saveConfig(draft, newKey: nil))
+        XCTAssertTrue(tracker.config.enabled); XCTAssertTrue(tracker.verified)
+        XCTAssertEqual(tracker.config.consentSignature, config.consentSignature)
+        tracker.sample(); try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(received.count, 2)
+        XCTAssertEqual(received.last?.workBackground, "软件开发")
+        // Change instructions while the previous request is still in flight.
+        draft = tracker.config; draft.classificationRules = nil
+        XCTAssertTrue(tracker.saveConfig(draft, newKey: nil))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(tracker.ledger.segments.contains { $0.category == .development })
+        tracker.sample(); try await Task.sleep(for: .milliseconds(160))
+        XCTAssertEqual(received.count, 3); XCTAssertNil(received.last?.classificationRules)
+        XCTAssertEqual(tracker.current?.category, .reading)
+        for segment in history { XCTAssertEqual(tracker.ledger.segments.first { $0.id == segment.id }?.category, segment.category) }
+        let restored = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 })
+        XCTAssertEqual(restored.config.workBackground, "软件开发"); XCTAssertNil(restored.config.classificationRules)
+        XCTAssertTrue(restored.verified); XCTAssertTrue(restored.config.enabled)
+    }
+
     func testSecondSamplingCompatibilityAndCadence() throws {
         let legacy = try JSONEncoder().encode(AutomaticConfig())
         var config = try JSONDecoder().decode(AutomaticConfig.self, from: legacy)
@@ -31,7 +109,7 @@ extension FocusLensTests {
         try writeAutomatic(config, directory: directory)
         var app = ForegroundContext(pid: 42, bundleID: "test.reader", name: "阅读器")
         var captures = 0, calls = 0
-        let tracker = AutomaticTracker(directory: directory, startClock: false, permission: { true }, sessionAvailable: { true }, foreground: { app }, capture: { _ in
+        let tracker = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 }, permission: { true }, sessionAvailable: { true }, foreground: { app }, capture: { _ in
             captures += 1
             return MemoryScreenCapture.Frame(jpeg: Data([1]), fingerprint: Data([UInt8(captures)]), contextKey: "window", capturedAt: Date())
         }, analyze: { _,_,_ in
@@ -63,7 +141,7 @@ extension FocusLensTests {
         XCTAssertEqual(tracker.current?.category, .unknown)
         XCTAssertTrue(tracker.current?.title.contains("编辑器") == true)
         XCTAssertFalse(tracker.recognitionDetail().contains("后台更新"))
-        let restored = AutomaticTracker(directory: directory, startClock: false)
+        let restored = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 })
         XCTAssertEqual(restored.config.intervalSeconds, 15)
         XCTAssertTrue(restored.config.enabled)
         XCTAssertTrue(restored.verified)
@@ -146,7 +224,7 @@ extension FocusLensTests {
         try writeAutomatic(config, directory: directory)
         let app = ForegroundContext(pid: 42, bundleID: "test.browser", name: "浏览器")
         var calls = 0
-        let denied = AutomaticTracker(directory: directory, startClock: false, permission: { false }, foreground: { app }, capture: { _ in calls += 1; throw AutomaticError.noWindow })
+        let denied = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 }, permission: { false }, foreground: { app }, capture: { _ in calls += 1; throw AutomaticError.noWindow })
         denied.enable(consent: false); denied.sample()
         XCTAssertFalse(denied.config.enabled)
         denied.enable(consent: true); denied.sample()
@@ -154,7 +232,7 @@ extension FocusLensTests {
         XCTAssertEqual(calls, 0)
         config.enabled = true; config.consentSignature = VisionService.signature(config); config.excludedApps[app.bundleID] = "浏览器"
         try writeAutomatic(config, directory: directory)
-        let excluded = AutomaticTracker(directory: directory, startClock: false, permission: { true }, sessionAvailable: { true }, foreground: { app }, capture: { _ in calls += 1; throw AutomaticError.noWindow })
+        let excluded = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 }, permission: { true }, sessionAvailable: { true }, foreground: { app }, capture: { _ in calls += 1; throw AutomaticError.noWindow })
         excluded.reconcile(); excluded.resume(); excluded.sample()
         XCTAssertEqual(excluded.status, .excluded("浏览器"))
         XCTAssertEqual(calls, 0)
@@ -168,7 +246,7 @@ extension FocusLensTests {
         var app = ForegroundContext(pid: 42, bundleID: "test.browser", name: "浏览器")
         var captures = 0, analyses = 0
         let privateImage = Data("PRIVATE_IMAGE_BYTES_MUST_NOT_BE_SAVED".utf8)
-        let tracker = AutomaticTracker(directory: directory, startClock: false, permission: { true }, sessionAvailable: { true }, foreground: { app }, capture: { _ in
+        let tracker = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 }, permission: { true }, sessionAvailable: { true }, foreground: { app }, capture: { _ in
             captures += 1
             return MemoryScreenCapture.Frame(jpeg: privateImage, fingerprint: Data([1,2,3]), contextKey: "page", capturedAt: Date())
         }, analyze: { _, _, _ in analyses += 1; try? await Task.sleep(for: .milliseconds(70)); return ActivityClassification(category: .reading, title: "阅读文档") })
@@ -179,7 +257,7 @@ extension FocusLensTests {
         tracker.sample(); try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(captures, 2); XCTAssertEqual(analyses, 1)
         tracker.pause(); tracker.sample(); XCTAssertEqual(captures, 2)
-        let restored = AutomaticTracker(directory: directory, startClock: false, permission: { true }, sessionAvailable: { true }, foreground: { app })
+        let restored = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 }, permission: { true }, sessionAvailable: { true }, foreground: { app })
         restored.reconcile(); XCTAssertEqual(restored.status, .paused)
         tracker.resume(); app = ForegroundContext(pid: 43, bundleID: "test.editor", name: "编辑器"); tracker.reconcile(); tracker.sample()
         tracker.setAway(true)
@@ -212,7 +290,7 @@ extension FocusLensTests {
         config.enabled = true; config.verifiedSignature = VisionService.signature(config); config.consentSignature = config.verifiedSignature
         try writeAutomatic(config, directory: directory)
         let app = ForegroundContext(pid: 42, bundleID: "test.browser", name: "浏览器")
-        let tracker = AutomaticTracker(directory: directory, startClock: false, permission: { true }, sessionAvailable: { true }, foreground: { app }, capture: { _ in
+        let tracker = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 }, permission: { true }, sessionAvailable: { true }, foreground: { app }, capture: { _ in
             MemoryScreenCapture.Frame(jpeg: Data([1]), fingerprint: Data([2]), contextKey: "context", capturedAt: Date())
         }, analyze: { _,_,_ in throw AutomaticError.invalidResponse })
         tracker.sample(); try await Task.sleep(for: .milliseconds(100))
@@ -255,8 +333,16 @@ extension FocusLensTests {
         try await VisionService.test(settings: settings, key: "test-secret", challenge: image)
         let bitmap = try XCTUnwrap(NSBitmapImageRep(data: image.image))
         let jpeg = try MemoryScreenCapture.encode(try XCTUnwrap(bitmap.cgImage))
-        let result = try await VisionService.classify(image: jpeg, settings: settings, key: "test-secret")
+        let result = try await VisionService.classify(image: jpeg, settings: settings, key: "test-secret", workBackground: "软件开发", rules: "阅读技术文档归阅读")
         XCTAssertEqual(result.category, .reading)
+        let (data, _) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/requests")!)
+        let requests = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        let bodies = requests.compactMap { $0["body"] as? [String: Any] }.filter { $0["model"] as? String == "vision-contract" }
+        XCTAssertEqual(bodies.count, 2)
+        let testWire = String(decoding: try JSONSerialization.data(withJSONObject: bodies[0]), as: UTF8.self)
+        let classifyWire = String(decoding: try JSONSerialization.data(withJSONObject: bodies[1]), as: UTF8.self)
+        XCTAssertFalse(testWire.contains("软件开发"))
+        XCTAssertTrue(classifyWire.contains("软件开发")); XCTAssertTrue(classifyWire.contains("阅读技术文档归阅读"))
         do {
             let wrong = try VisionChallenge.make(code: "1234", color: "red")
             try await VisionService.test(settings: settings, key: "test-secret", challenge: wrong)

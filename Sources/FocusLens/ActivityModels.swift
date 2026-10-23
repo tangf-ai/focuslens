@@ -20,6 +20,25 @@ struct ActivitySegment: Codable, Identifiable, Equatable {
 
 struct AutomaticConfig: Codable, Equatable {
     var ai = AISettings()
+    // Optional so older settings decode without a migration or a model reset.
+    var workBackground: String?
+    var classificationRules: String?
+    var inactivity: InactivitySettings?
+    var inactivitySettings: InactivitySettings {
+        get { var value = inactivity ?? InactivitySettings(); value.normalize(); return value }
+        set { var value = newValue; value.normalize(); inactivity = value }
+    }
+    static let backgroundLimit = 1000
+    static let rulesLimit = 2000
+    static func guidanceText(_ value: String?, limit: Int) -> String {
+        String((value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).prefix(limit))
+    }
+    mutating func normalizeGuidance() {
+        let background = Self.guidanceText(workBackground, limit: Self.backgroundLimit)
+        let rules = Self.guidanceText(classificationRules, limit: Self.rulesLimit)
+        workBackground = background.isEmpty ? nil : background
+        classificationRules = rules.isEmpty ? nil : rules
+    }
     var intervalMinutes = 2
     // Optional for compatibility with settings saved before second-based sampling.
     var samplingSeconds: Int?
@@ -92,6 +111,13 @@ struct ActivityLedger {
 
     mutating func stop(at date: Date) { checkpoint(at: date); currentID = nil }
 
+    mutating func stopAtInactivityBoundary(_ date: Date) {
+        if let index = segments.firstIndex(where: { $0.id == currentID }) {
+            segments[index].end = max(segments[index].start, min(segments[index].end, date))
+        }
+        stop(at: date)
+    }
+
     mutating func correct(id: UUID, category: ActivityCategory, title: String) {
         guard let index = segments.firstIndex(where: { $0.id == id }) else { return }
         segments[index].category = category
@@ -109,12 +135,13 @@ struct ActivityLedger {
 }
 
 enum AutomaticStatus: Equatable {
-    case off, paused, away, manual, excluded(String), waiting, recognizing, recording, uncertain, error(String), resting(Date)
+    case off, paused, away, inactive, manual, excluded(String), waiting, recognizing, recording, uncertain, error(String), resting(Date)
     var label: String {
         switch self {
         case .off: "自动记录未启用"
         case .paused: "记录已暂停"
         case .away: "已离开电脑"
+        case .inactive: "可能已离开"
         case .manual: "手动计时期间暂挂"
         case .excluded: "此应用不记录"
         case .waiting: "等待更新"
@@ -130,6 +157,7 @@ enum AutomaticStatus: Equatable {
         case .off: "配置视觉模型、授权并确认后开启。"
         case .paused: "暂停期间不截图、不分析、不累计。"
         case .away: "锁屏或睡眠期间不记录，回来后重新识别。"
+        case .inactive: "持续无操作，已暂停累计与截图；恢复键鼠操作后自动继续，可确认刚才的空闲时段。"
         case .manual: "保留手动计时，避免重复记录。"
         case .excluded(let name): "正在使用\(name)，离开后恢复识别。"
         case .waiting: "当前窗口等待下一次采样，尚未发送识别请求。"

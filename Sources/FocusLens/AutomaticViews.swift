@@ -20,6 +20,7 @@ struct AutomaticHome: View {
             if activity.undoSnapshot != nil {
                 Button("撤销上一次分类修正") { activity.undoCorrection() }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Theme.accent)
             }
+            InactivityReviewCard()
             if !activity.config.enabled {
                 Spacer()
                 VStack(alignment: .leading, spacing: 18) {
@@ -77,7 +78,7 @@ struct AutomaticHome: View {
                 }
                 HStack { Text("最近的活动").font(.system(size: 13, weight: .semibold)); Spacer(); Button("完整时间线", action: onTimeline).buttonStyle(.plain).foregroundStyle(Theme.accent) }
                 if records.isEmpty { Text("切换到工作窗口后开始识别；没有识别结果前，不推测具体活动。").font(.system(size: 12)).foregroundStyle(Theme.muted) }
-                ForEach(Array(records.prefix(3))) { ActivityRow(segment: $0) }
+                ForEach(Array(records.prefix(activity.pendingInactivityPeriods.isEmpty ? 3 : 1))) { ActivityRow(segment: $0) }
                 Spacer(minLength: 0)
                 Text("每 \(activity.config.intervalLabel)识别 · 切换应用提前更新 · 截图不保存 · 时长为估算")
                     .font(.system(size: 10)).foregroundStyle(Theme.muted)
@@ -143,6 +144,7 @@ struct ActivityTimeline: View {
                 Button("导出自动记录") { export() }.buttonStyle(QuietButtonStyle())
             }
             if activity.undoSnapshot != nil { Button("撤销上一次分类修正") { activity.undoCorrection() }.buttonStyle(.plain).foregroundStyle(Theme.accent).font(.system(size: 12)) }
+            InactivityReviewCard()
             let interval = Calendar.current.dateInterval(of: .day, for: day)!
             let records = activity.segments(in: interval)
             Text("约 " + durationText(records.reduce(0) { $0 + $1.seconds })).font(.system(size: 26, weight: .medium))
@@ -162,6 +164,32 @@ struct ActivityTimeline: View {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted]; encoder.dateEncodingStrategy = .iso8601
             try encoder.encode(records).write(to: url, options: .atomic)
         } catch { activity.errorMessage = "导出失败，请检查保存位置。" }
+    }
+}
+
+struct InactivityReviewCard: View {
+    @EnvironmentObject private var activity: AutomaticTracker
+    var body: some View {
+        if let period = activity.pendingInactivityPeriods.first {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("有一段空闲时间待确认", systemImage: "figure.walk").font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    if activity.pendingInactivityPeriods.count > 1 {
+                        Text("共 \(activity.pendingInactivityPeriods.count) 段").font(.system(size: 10)).foregroundStyle(Theme.muted)
+                    }
+                }
+                Text(period.start.formatted(.dateTime.locale(Locale(identifier: "zh_CN")).month().day().hour().minute()) + " — " + (period.end ?? period.observedThrough).formatted(.dateTime.locale(Locale(identifier: "zh_CN")).month().day().hour().minute()) + " · 约 " + durationText(period.seconds))
+                    .font(.system(size: 11)).foregroundStyle(Theme.muted)
+                Text("这段尚未计入。仍在专注可补记为「\(period.category.rawValue) · \(period.title)」，之后也能修改分类。")
+                    .font(.system(size: 11)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button(period.presentLabel) { activity.resolveInactivity(id: period.id, wasPresent: true) }.buttonStyle(QuietButtonStyle())
+                    Button("确实离开了") { activity.resolveInactivity(id: period.id, wasPresent: false) }.buttonStyle(QuietButtonStyle())
+                }
+            }.padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line, lineWidth: 1))
+        }
     }
 }
 
@@ -192,7 +220,9 @@ struct AutomaticSettings: View {
     @State private var draft = AutomaticConfig()
     @State private var key = ""
     @State private var removeKey = false
-    private var changed: Bool { draft.ai != activity.config.ai || draft.intervalSeconds != activity.config.intervalSeconds || draft.reminderMinutes != activity.config.reminderMinutes || draft.reminders != activity.config.reminders || draft.excludedApps != activity.config.excludedApps }
+    @State private var savedConfig: AutomaticConfig?
+    private var saved: Bool { savedConfig == draft && key.isEmpty }
+    private var changed: Bool { draft.ai != activity.config.ai || draft.workBackground != activity.config.workBackground || draft.classificationRules != activity.config.classificationRules || draft.inactivitySettings != activity.config.inactivitySettings || draft.intervalSeconds != activity.config.intervalSeconds || draft.reminderMinutes != activity.config.reminderMinutes || draft.reminders != activity.config.reminders || draft.excludedApps != activity.config.excludedApps }
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
             Label("视觉模型与自动记录", systemImage: "scan.viewfinder").font(.system(size: 17, weight: .semibold))
@@ -220,6 +250,8 @@ struct AutomaticSettings: View {
             }
             Text("本地模型可先选15秒，再按响应速度调到5或10秒。切换应用会提前更新，最快间隔5秒；慢请求不叠加，已有结果继续显示。")
                 .font(.system(size: 10)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            guidanceSettings
+            inactivitySettings
             Toggle("连续活动后在浮窗轻提示休息", isOn: $draft.reminders).font(.system(size: 12))
             Picker("提醒间隔", selection: $draft.reminderMinutes) { ForEach([25,30,45,60], id: \.self) { Text("\($0) 分钟").tag($0) } }.frame(width: 240)
             HStack { Text("不记录的应用").font(.system(size: 12)); Spacer(); Button("添加应用") { addApp() }.buttonStyle(.plain).foregroundStyle(Theme.accent) }
@@ -231,10 +263,16 @@ struct AutomaticSettings: View {
                 }
             }
             HStack {
-                Button("保存自动记录设置") { activity.saveConfig(draft, newKey: key.isEmpty ? nil : key); draft = activity.config; key = "" }
+                Button("保存自动记录设置") {
+                    if activity.saveConfig(draft, newKey: key.isEmpty ? nil : key) { draft = activity.config; key = ""; savedConfig = draft }
+                }
                     .buttonStyle(QuietButtonStyle()).disabled(activity.testing)
                 Button(activity.testing ? "正在测试…" : "测试图片理解") { activity.testVision() }
                     .buttonStyle(QuietButtonStyle()).disabled(activity.testing || changed || !key.isEmpty)
+            }
+            if saved {
+                Label("自动记录设置已保存", systemImage: "checkmark.circle")
+                    .font(.system(size: 11)).foregroundStyle(Theme.muted)
             }
             Text(activity.testMessage).font(.system(size: 11)).foregroundStyle(activity.verified ? Theme.muted : Theme.accent)
             if activity.config.enabled { Button("关闭自动记录") { activity.disable() }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.accent) }
@@ -245,6 +283,67 @@ struct AutomaticSettings: View {
                 Button("清除密钥", role: .destructive) { activity.saveConfig(activity.config, newKey: ""); draft = activity.config; key = "" }
                 Button("取消", role: .cancel) { }
             }
+    }
+    private var inactivitySettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle("无操作检测", isOn: $draft.inactivitySettings.enabled).font(.system(size: 13, weight: .semibold))
+            Text("连续无键鼠操作达到等待时间后，显示「可能已离开」，暂停累计与截图。恢复操作后约 5 秒内继续；空闲时段由你确认是否补记。")
+                .font(.system(size: 11)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 10) {
+                inactivityPicker("通用等待", value: $draft.inactivitySettings.minutes, continuous: false)
+                inactivityPicker("阅读时", value: $draft.inactivitySettings.readingMinutes, continuous: true)
+                inactivityPicker("视频时", value: $draft.inactivitySettings.videoMinutes, continuous: true)
+            }.disabled(!draft.inactivitySettings.enabled)
+            Text("默认通用 5 分钟、阅读 15 分钟、视频 30 分钟。阅读和视频也可选择继续记录。只读取系统空闲时长，不记录按键内容，不新增模型请求；不影响手动倒计时。")
+                .font(.system(size: 10)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+        }.padding(16).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.line, lineWidth: 1))
+    }
+    private func inactivityPicker(_ title: String, value: Binding<Int>, continuous: Bool) -> some View {
+        Picker(title, selection: value) {
+            ForEach(InactivitySettings.intervals, id: \.self) { Text("\($0) 分钟后暂停").tag($0) }
+            if continuous { Text("继续记录").tag(0) }
+        }.frame(width: 270)
+    }
+    private var guidanceSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("我的活动说明", systemImage: "text.bubble").font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button("恢复默认") { draft.workBackground = nil; draft.classificationRules = nil }
+                    .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Theme.accent)
+                    .disabled((draft.workBackground ?? "").isEmpty && (draft.classificationRules ?? "").isEmpty)
+            }
+            Text("告诉 AI 你主要做什么、怎样区分活动，帮助减少误分类。说明会随截图发送到当前视觉模型服务；留空使用默认识别。")
+                .font(.system(size: 11)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            guidanceEditor("我的工作背景", text: Binding(get: { draft.workBackground ?? "" }, set: { draft.workBackground = String($0.prefix(AutomaticConfig.backgroundLimit)) }),
+                           limit: AutomaticConfig.backgroundLimit, placeholder: "例如：我主要从事软件开发、AI 应用研究，也会阅读技术资料和编写项目方案。", height: 72)
+            guidanceEditor("活动分类习惯", text: Binding(get: { draft.classificationRules ?? "" }, set: { draft.classificationRules = String($0.prefix(AutomaticConfig.rulesLimit)) }),
+                           limit: AutomaticConfig.rulesLimit, placeholder: "例如：在 AI 工具中修改代码、排查错误归为开发；查看技术文档归为阅读；编辑方案归为写作。请结合内容判断。", height: 108)
+            Text("可用分类：阅读、写作、开发、沟通、视频、其他。证据不足仍标为待确认。保存后用于后续识别，历史记录保留；恢复默认会清空两项说明，保存后生效。")
+                .font(.system(size: 10)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+        }.padding(16).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.line, lineWidth: 1))
+    }
+    private func guidanceEditor(_ title: String, text: Binding<String>, limit: Int, placeholder: String, height: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title).font(.system(size: 12, weight: .medium))
+                Spacer()
+                Text("\(text.wrappedValue.count) / \(limit)").font(.system(size: 10)).monospacedDigit().foregroundStyle(Theme.muted)
+            }
+            ZStack(alignment: .topLeading) {
+                if text.wrappedValue.isEmpty {
+                    Text(placeholder).font(.system(size: 12)).foregroundStyle(Theme.muted)
+                        .padding(.horizontal, 6).padding(.vertical, 8).allowsHitTesting(false)
+                }
+                TextEditor(text: text).font(.system(size: 12)).foregroundStyle(Theme.ink)
+                    .scrollContentBackground(.hidden).padding(.vertical, 2)
+                    .accessibilityLabel(title)
+            }.frame(height: height).padding(.horizontal, 5)
+                .background(Theme.background, in: RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.line, lineWidth: 1))
+        }
     }
     private func addApp() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.application]; panel.allowsMultipleSelection = false

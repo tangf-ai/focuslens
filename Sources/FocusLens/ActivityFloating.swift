@@ -83,6 +83,10 @@ final class ActivityFloatingController: NSObject {
         content.status.toolTip = content.status.stringValue
         content.title.stringValue = active || tracker.status == .paused ? segment.map { "\($0.category.rawValue) · \($0.title)" } ?? "当前活动待确认" : tracker.status.detail
         content.detail.stringValue = active ? tracker.recognitionDetail() : "不截图、不分析"
+        if tracker.status == .inactive {
+            content.title.stringValue = "无操作，计时已暂停"
+            content.detail.stringValue = "恢复操作自动继续 · 空闲时段可在主窗口确认"
+        }
         if case .error(let message) = tracker.status { content.detail.stringValue = message }
         let today = tracker.segments(in: Period.today.interval()).filter { $0.category == segment?.category }.reduce(0) { $0 + $1.seconds }
         content.daily.stringValue = active ? "今日约 \(Int(today / 60)) 分钟" : ""
@@ -115,6 +119,11 @@ final class ActivityFloatingController: NSObject {
             let remaining = max(0, Double(tracker.config.reminderMinutes * 60) - seconds)
             content.progressText.stringValue = "距休息建议约 \(Int(ceil(remaining / 60))) 分钟"
             content.setProgress(remaining / Double(tracker.config.reminderMinutes * 60), visible: tracker.config.reminders && segment?.category != .unknown && segment != nil)
+            if tracker.status == .inactive {
+                content.caption.stringValue = "空闲期间未累计"
+                content.progressText.stringValue = "恢复操作后自动继续"
+                content.setProgress(0, visible: false)
+            }
         }
         if active { content.detail.stringValue = tracker.recognitionDetail() }
     }
