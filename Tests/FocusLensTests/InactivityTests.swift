@@ -67,22 +67,19 @@ extension FocusLensTests {
         XCTAssertEqual(f.tracker.inactivityPeriods.first?.start, start.addingTimeInterval(300))
         try await f.sample(after: 60)
         XCTAssertEqual(f.captures, 5); XCTAssertEqual(f.total, 300, accuracy: 0.01)
-        XCTAssertFalse(f.tracker.canRefresh)
+        XCTAssertFalse(f.tracker.isRecognizing)
         f.now.addTimeInterval(10); f.elapsed = 0; f.tracker.checkInactivity()
         XCTAssertEqual(f.tracker.status, .waiting)
-        let period = try XCTUnwrap(f.tracker.pendingInactivityPeriods.first)
+        let period = try XCTUnwrap(f.tracker.inactivityPeriods.first { $0.end != nil })
         XCTAssertEqual(period.seconds, 75, accuracy: 0.01)
         XCTAssertEqual(f.total, 300, accuracy: 0.01)
         try await f.sample()
         XCTAssertEqual(f.tracker.status, .recording)
-        f.tracker.resolveInactivity(id: period.id, wasPresent: true)
-        XCTAssertEqual(f.total, 375, accuracy: 0.01)
-        f.tracker.resolveInactivity(id: period.id, wasPresent: true)
-        XCTAssertEqual(f.total, 375, accuracy: 0.01)
-        XCTAssertTrue(f.tracker.pendingInactivityPeriods.isEmpty)
+        XCTAssertEqual(period.resolution, .away)
+        XCTAssertEqual(f.total, 300, accuracy: 0.01)
         let restored = AutomaticTracker(directory: f.directory, startClock: false, idleSeconds: { 0 }, now: { f.now })
-        XCTAssertEqual(restored.ledger.segments.reduce(0) { $0 + $1.seconds }, 375, accuracy: 0.01)
-        XCTAssertTrue(restored.ledger.segments.contains { $0.corrected && $0.seconds == 75 })
+        XCTAssertEqual(restored.ledger.segments.reduce(0) { $0 + $1.seconds }, 300, accuracy: 0.01)
+        XCTAssertFalse(restored.ledger.segments.contains { $0.corrected })
     }
 
     @MainActor func testInactivityReadingVideoExemptionAndManualPause() async throws {
@@ -95,13 +92,10 @@ extension FocusLensTests {
         f.tracker.pause(); f.elapsed = 0; f.now.addTimeInterval(20); f.tracker.checkInactivity()
         XCTAssertEqual(f.tracker.status, .paused)
         f.tracker.resume(); try await f.sample()
-        f.tracker.setManualBlocked(true, at: f.now)
-        f.elapsed = 9999; f.tracker.reconcile(); f.tracker.sample()
-        XCTAssertEqual(f.tracker.status, .manual); XCTAssertTrue(f.tracker.inactivityPeriods.isEmpty)
         // A disabled detector keeps recording even if the system counter is large.
         var draft = f.tracker.config; draft.inactivitySettings.enabled = false
         XCTAssertTrue(f.tracker.saveConfig(draft, newKey: nil))
-        f.tracker.setManualBlocked(false, at: f.now); try await f.sample()
+        try await f.sample()
         XCTAssertEqual(f.tracker.status, .recording)
     }
 
@@ -115,7 +109,7 @@ extension FocusLensTests {
         let first = try XCTUnwrap(f.tracker.inactivityPeriods.first)
         XCTAssertEqual(first.seconds, 5, accuracy: 0.01)
         f.now.addTimeInterval(7200); f.elapsed += 7200; f.tracker.checkInactivity()
-        XCTAssertEqual(f.tracker.pendingInactivityPeriods.first?.seconds, 5)
+        XCTAssertEqual(f.tracker.inactivityPeriods.first { $0.end != nil }?.seconds, 5)
         XCTAssertEqual(f.tracker.inactivityPeriods.last?.start, f.now)
         XCTAssertEqual(f.tracker.inactivityPeriods.last?.seconds, 0)
     }
@@ -135,13 +129,12 @@ extension FocusLensTests {
         XCTAssertEqual(f.tracker.status, .inactive); XCTAssertNil(f.tracker.current)
         f.now.addTimeInterval(30); f.elapsed += 30; f.tracker.setLifecycleBlock("lock", blocked: true)
         XCTAssertEqual(f.tracker.status, .away)
-        let gap = try XCTUnwrap(f.tracker.pendingInactivityPeriods.first)
+        let gap = try XCTUnwrap(f.tracker.inactivityPeriods.first { $0.end != nil })
         let before = f.total
         f.now.addTimeInterval(3600); f.elapsed = 0; f.tracker.setLifecycleBlock("lock", blocked: false)
         XCTAssertEqual(f.tracker.inactivityPeriods.first?.seconds, gap.seconds)
-        f.tracker.resolveInactivity(id: gap.id, wasPresent: false)
         XCTAssertEqual(f.total, before, accuracy: 0.01)
-        XCTAssertTrue(f.tracker.pendingInactivityPeriods.isEmpty)
+        XCTAssertEqual(gap.resolution, .away)
     }
 
     @MainActor func testInactivityCrashRecoveryMidnightAndCorruptJournal() throws {
@@ -161,7 +154,7 @@ extension FocusLensTests {
         let first = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 })
         XCTAssertNil(first.errorMessage)
         XCTAssertEqual(first.ledger.segments.reduce(0) { $0 + $1.seconds }, 120)
-        XCTAssertEqual(first.pendingInactivityPeriods.first?.seconds, 60)
+        XCTAssertEqual(first.inactivityPeriods.first { $0.resolution == .pending }?.seconds, 60)
         let second = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 })
         XCTAssertEqual(second.ledger.segments.count, 2)
         XCTAssertEqual(second.ledger.segments.reduce(0) { $0 + $1.seconds }, 120)

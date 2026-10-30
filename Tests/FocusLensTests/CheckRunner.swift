@@ -42,24 +42,21 @@ struct CheckRunner {
             ("计时和反馈持久化", tests.testActiveAndPendingStateRoundTrip),
             ("接口地址与密钥拒绝规则", tests.testEndpointAcceptsBaseAndFullPathAndRejectsEmbeddedSecrets),
             ("AI数据范围及提示约束", tests.testAIPayloadContainsOnlySelectedEvidenceAndSafeguards),
-            ("重启恢复到期记录", tests.testStoreRecoversExpiredTimerAndPersistsFeedback),
-            ("提前结束及防止重叠", tests.testEarlyFinishPausedRunExcludesPauseAndPreventsOverlap),
             ("损坏文件保护", tests.testCorruptedFileIsNotOverwritten),
-            ("空目标启动及到期调度", tests.testCompletionTimerOnlyArmedWhileRunning),
             ("旧版数据备份及迁移", tests.testLegacyDataMigrationBacksUpAndPreservesRecords),
-            ("标签改名删除保留记录及复盘快照", tests.testCustomTagRenameDeleteKeepsHistoryAndMarksReviewStale),
-            ("标签重名校验及失败不写入", tests.testTagValidationRejectsDuplicatesWithoutWriting),
-            ("删除全部标签后无标签计时", tests.testDeletingAllTagsPersistsAndAllowsUntaggedFocus),
-            ("专注时长下限与选择持久化", tests.testFocusDurationBoundsAndSelectionPersistence),
             ("SSE事件边界和错误解析", tests.testStreamParserSupportsSSEFraming),
             ("追问快照与未完成轮次隔离", tests.testConversationSnapshotAndIncompleteTurns),
             ("旧复盘兼容与中断恢复", tests.testReviewArchiveCompatibilityAndInterruptedRecovery),
             ("秒级采样兼容与切换应用调度", tests.testSecondSamplingCompatibilityAndCadence),
             ("个人活动说明兼容持久化与图片请求", tests.testPersonalGuidanceCompatibilityAndRequest),
+            ("活动说明独立自动保存、恢复默认与写入失败", tests.testGuidanceAutosaveWithoutModelAndSettingsIsolation),
             ("无操作设置兼容与原生空闲计数", tests.testInactivityDefaultsCompatibilityAndNativeCounter),
             ("自动时间段合并与离线间隔", tests.testActivityLedgerBoundariesAndRestart),
-            ("自动跨日与人工修正", tests.testActivityMidnightAndCorrection),
+            ("旧分类兼容与活动跨日", tests.testActivityMidnightAndCorrection),
             ("视觉分类严格解析", tests.testVisionParsingAndTextOnlyRejection),
+            ("未识别原因兼容、分布守恒及小结隔离", tests.testUnknownReasonCompatibilityAndHonestDistribution),
+            ("短等待吸收边界与历史不回填", tests.testShortWaitResolutionIsBoundedAndNeverRewritesHistory),
+            ("失败重试退避及诊断脱敏", tests.testRecognitionRetryAndSanitizedErrorCodes),
             ("图片内存编码与图片请求", tests.testMemoryImageEncodingAndRequest),
             ("自动复盘不虚构完成率", tests.testAutomaticReviewNeverInventsCompletion),
             ("左侧竖屏与拔屏后浮窗恢复", tests.testPortraitDisplayAndRemovedDisplayRecovery),
@@ -69,7 +66,14 @@ struct CheckRunner {
             ("外观默认值持久化与配置隔离", tests.testAppearanceDefaultsPersistenceAndIsolation),
             ("外观损坏保护与主题观察更新", tests.testAppearanceCorruptionAndObservation),
             ("动画节能策略与主题文字对比度", tests.testDecorativeMotionPolicyAndThemeContrast),
-            ("浮窗主题布局与冻结状态", tests.testFloatingAppearanceLayoutsAndFrozenMotion)
+            ("轻量浮窗各主题布局", tests.testFloatingAppearanceLayoutsAndFrozenMotion),
+            ("自动版迁移停止旧轮次并完整备份", tests.testAutomaticOnlyMigrationFreezesAndArchivesWithoutInventingFeedback),
+            ("未来数据版本保护与导出拒绝", tests.testFutureSchemaIsProtectedAndExportFailsClosed),
+            ("仅自动记录的旧安装也完整备份", tests.testMigrationAlsoBacksUpAutomaticOnlyInstallations),
+            ("同类相邻片段合并且不跨空白", tests.testActivityDisplayMergesOnlyContinuousSameApplicationAndCategory),
+            ("自动周统计未来留空与跨日拆分", tests.testAutomaticWeeklyTotalsExcludeFutureAndSplitMidnight),
+            ("小结时段上限与错过调度不补发", tests.testSummaryPolicyCapsSlotsAndSkipsMissedSchedules),
+            ("统一导出历史文件与清除前备份", tests.testUnifiedExportIncludesOldFilesAndClearBacksUpWithoutDeletingLegacy)
         ]
         for (name, check) in checks {
             let before = failureCount
@@ -84,35 +88,40 @@ struct CheckRunner {
         do { try await tests.testAIDeniedAndEmptyResponseAreReported() }
         catch { fail("\(error)", file: #filePath, line: #line) }
         print("\(beforeErrors == failureCount ? "PASS" : "FAIL") AI鉴权失败与空响应")
-        let beforeDeadline = failureCount
-        do { try await tests.testDeadlineFiresWithoutCountdownView() }
-        catch { fail("\(error)", file: #filePath, line: #line) }
-        print("\(beforeDeadline == failureCount ? "PASS" : "FAIL") 无界面刷新仍按期完成")
         let streamingChecks: [(String, () async throws -> Void)] = [
-            ("浮窗主题联动与结束后目标保留", tests.testFloatingControllerKeepsGoalAtFeedbackAndAppearanceChange),
             ("真实HTTP流式传输和异常", tests.testRealStreamingTransportAndFailures),
             ("流式取消保留已收文字", tests.testStreamingCancellationRetainsText),
-            ("多轮追问快照与保存恢复", tests.testStoreStreamingConversationPersistence),
             ("屏幕变化找回隐藏浮窗且不自动显示", tests.testScreenChangeRecoversHiddenPanelWithoutShowingIt),
             ("后台识别保留活动与等待状态区分", tests.testBackgroundRecognitionKeepsConfirmedActivity),
             ("说明保存后相同画面重识别与旧结果取消", tests.testGuidanceSaveInvalidatesImageCacheAndCancelsOldResult),
-            ("空闲边界暂停恢复及补记只执行一次", tests.testInactivityPausesAtBoundaryResumesAndConfirmsOnce),
-            ("静态阅读视频豁免与手动暂停优先", tests.testInactivityReadingVideoExemptionAndManualPause),
+            ("空闲边界暂停恢复且不再补记", tests.testInactivityPausesAtBoundaryResumesAndConfirmsOnce),
+            ("静态阅读视频豁免与主动暂停优先", tests.testInactivityReadingVideoExemptionAndManualPause),
             ("阅读较长等待与进程挂起不补记", tests.testInactivityReadingUsesLongerDefaultAndNoOfflineFill),
             ("空闲丢弃迟到响应与锁屏不补记", tests.testInactivityLateResultLockAndAwayDecision),
             ("空闲确认跨日崩溃恢复与损坏保护", tests.testInactivityCrashRecoveryMidnightAndCorruptJournal),
             ("自动记录授权与排除门槛", tests.testAutomaticConsentAndPrivacyGates),
             ("单次识别取消与截图不落盘", tests.testAutomaticSingleFlightCancellationAndMemoryOnly),
             ("自动断连与历史文件不覆盖", tests.testAutomaticFailureAndHistoricalSafety),
+            ("同窗口短等待吸收且不丢时长", tests.testSameWindowShortWaitIsAbsorbedWithoutLosingTime),
+            ("不同窗口及长等待不回填", tests.testChangedWindowAndLongWaitAreNotBackfilled),
+            ("异常恢复保留原片段并区分证据不足", tests.testFailureRecoveryPreservesFailureAndSeparatesModelUncertainty),
+            ("取消不串应用且诊断不含敏感内容", tests.testCancelledAttemptNeverClassifiesAnotherAppOrLeaksContent),
+            ("诊断上限、损坏保护及备份清理", tests.testDiagnosticRetentionAndCorruptionDoNotDamageActivities),
             ("真实HTTP视觉图片与能力检测", tests.testVisionWireCapabilityContract),
-            ("图片请求不跟随重定向", tests.testVisionRedirectNeverForwardsImage)
+            ("图片请求不跟随重定向", tests.testVisionRedirectNeverForwardsImage),
+            ("小结独立授权、证据去重和每天三次", tests.testSummaryNeedsIndependentConsentAndChangedEvidence),
+            ("小结失败保留旧结果及重启预算", tests.testSummaryFailureKeepsOldReportAndBudgetSurvivesRestart),
+            ("小结取消、换服务与迟到结果隔离", tests.testSummaryCancellationAndServiceChangeNeverAcceptLateResults),
+            ("小结损坏和写入失败不发送", tests.testSummaryCorruptAndUnwritableFilesNeverSend),
+            ("小结真实HTTP文字契约与禁止重定向", tests.testSummaryRealHTTPUsesOnlyTextAndRejectsRedirects),
+            ("暂停记录取消小结且保留次数", tests.testPausingRecordingCancelsSummaryAndDoesNotResetBudget)
         ]
         for (name, check) in streamingChecks {
             let before = failureCount
             do { try await check() } catch { fail("\(error)", file: #filePath, line: #line) }
             print("\(before == failureCount ? "PASS" : "FAIL") \(name)")
         }
-        print("\(checks.count + 3 + streamingChecks.count) 项检查，\(failureCount) 个失败")
+        print("\(checks.count + 2 + streamingChecks.count) 项检查，\(failureCount) 个失败")
         if failureCount > 0 { exit(1) }
     }
 }

@@ -2,130 +2,133 @@ import SwiftUI
 
 struct SettingsWorkspace: View {
     @EnvironmentObject private var store: FocusStore
-    @State private var focus = 25
-    @State private var rest = 5
-    @State private var baseURL = ""
-    @State private var model = ""
-    @State private var key = ""
-    @State private var replaceKey = false
-    @State private var saved = false
-    @State private var confirmDeleteKey = false
-    @State private var tagManagerOpen = false
-    private var appVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版" }
+    @EnvironmentObject private var activity: AutomaticTracker
+    @EnvironmentObject private var summary: AutomaticSummaryController
+    @State private var showArchive = false
+    @State private var showRecordingConsent = false
+    @State private var recordingConsent = false
+    @State private var showSummaryConsent = false
+    @State private var confirmClear = false
+    @State private var modelExpanded = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
-                PageTitle(title: "设置", subtitle: "调整专注周期，连接你使用的 AI 服务")
-                AutomaticSettings()
-                Rectangle().fill(Theme.line).frame(height: 1)
-                sectionTitle("专注与休息", symbol: "timer")
-                HStack(spacing: 35) {
-                    durationField("默认专注", value: $focus, range: 5...180)
-                    durationField("默认休息", value: $rest, range: 1...60)
-                    Spacer()
-                }
-                Text("开始后自动显示可拖动的置顶倒计时浮窗，关闭浮窗不会结束计时。专注模式会放大计时器并进入全屏，计时结束后退出由应用开启的全屏。休息需手动开始；应用不修改系统勿扰或通知设置，也不播放提示音。")
-                    .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5).fixedSize(horizontal: false, vertical: true)
-                Rectangle().fill(Theme.line).frame(height: 1)
-                HStack {
-                    VStack(alignment: .leading, spacing: 7) {
-                        sectionTitle("专注标签", symbol: "tag")
-                        Text("\(store.data.taskKinds.count) 个标签，可新增、改名和删除。")
-                            .font(.system(size: 11)).foregroundStyle(Theme.muted)
+                PageTitle(title: "设置", subtitle: "配置一次，之后在后台自动记录。隐私控制始终由你决定。")
+                section("记录与隐私") {
+                    row("自动记录", detail: "授权后随应用启动；锁屏、睡眠和持续无操作时暂停。") {
+                        Toggle("自动记录", isOn: Binding(get: { activity.config.enabled }, set: { enabled in
+                            if enabled { recordingConsent = false; showRecordingConsent = true } else { activity.disable() }
+                        })).labelsHidden().toggleStyle(.switch)
                     }
-                    Spacer()
-                    Button("管理标签") { tagManagerOpen = true }.buttonStyle(QuietButtonStyle())
+                    if activity.config.enabled { HStack { Text(activity.status.label).font(.system(size: 11)).foregroundStyle(Theme.muted); Spacer(); Button(activity.status == .paused ? "恢复记录" : "暂停记录") { if activity.status == .paused { activity.resume() } else { activity.pause() } }.buttonStyle(QuietButtonStyle()) } }
+                    DisclosureGroup("识别服务、排除应用与等待时间", isExpanded: $modelExpanded) { AutomaticSettings().padding(.top, 18) }
+                        .font(.system(size: 12)).tint(Theme.accent)
                 }
-                Rectangle().fill(Theme.line).frame(height: 1)
-                sectionTitle("AI 接口", symbol: "sparkles")
-                VStack(alignment: .leading, spacing: 19) {
-                    labeledField("接口基础地址", placeholder: "https://你的服务地址/v1", text: $baseURL)
-                    Text("支持 Chat Completions 格式；可填写基础地址或完整地址。远程服务建议使用 HTTPS。")
-                        .font(.system(size: 10)).foregroundStyle(Theme.muted).padding(.top, -11)
-                    labeledField("模型名称", placeholder: "填写服务支持的模型名称", text: $model)
+                section("自动小结") {
+                    row("根据文字记录自动整理", detail: "单独授权，仅发送活动文字到已确认的视觉服务。最多每天 3 次，不逐条调用。") {
+                        Toggle("自动小结", isOn: Binding(get: { summary.enabled }, set: { enabled in
+                            if enabled { showSummaryConsent = true } else { summary.disable() }
+                        })).labelsHidden().toggleStyle(.switch).disabled(!summary.enabled && (!activity.config.enabled || !activity.verified || !summary.dataReadable))
+                    }
+                    Text("每天首次打开“今天”、12:30 和 18:30 按需更新；内容未变则跳过。退出或睡眠时不唤醒电脑，回来后不补发所有错过的任务。失败本时段不重复请求。").font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5)
+                    if summary.hasConsent && !summary.enabled {
+                        Text("模型或密钥已变化，自动小结已停止。请核对服务后重新开启授权。").font(.system(size: 11)).foregroundStyle(Theme.accent)
+                        Button("撤销旧的小结授权") { summary.disable() }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Theme.accent)
+                    }
+                    if let error = summary.errorMessage { Text(error).font(.system(size: 11)).foregroundStyle(Theme.accent) }
+                }
+                section("外观与浮窗") {
+                    AppearanceSettings(appearance: store.appearance)
+                    HStack { Text("浮窗仅显示当前活动与估算时长，不再显示倒计时。").font(.system(size: 11)).foregroundStyle(Theme.muted); Spacer(); Button("显示浮窗") { activity.showFloating() }.buttonStyle(QuietButtonStyle()).disabled(!activity.config.enabled) }
+                }
+                section("数据与归档") {
+                    row("旧版记录与复盘", detail: "手动记录、旧复盘和升级前未完成轮次仅供只读查看，不混入自动统计。") { Button("查看归档") { showArchive = true }.buttonStyle(QuietButtonStyle()) }
+                    if let transition = store.data.legacyTransition {
+                        Text("已在 \(transition.migratedAt.formatted(.dateTime.month().day().hour().minute())) 完成迁移并保存完整备份。原计时已停止，未填写的反馈原样归档，没有虚构完成情况。").font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5)
+                    }
                     HStack {
-                        Text("API 密钥").font(.system(size: 12, weight: .medium))
+                        Button("导出全部记录") { store.exportAll() }.buttonStyle(QuietButtonStyle())
+                        Button("打开数据文件夹") { store.openDataDirectory() }.buttonStyle(QuietButtonStyle())
                         Spacer()
-                        Text(store.keyAvailable ? "已保存在系统钥匙串" : "尚未保存").font(.system(size: 10)).foregroundStyle(Theme.muted)
+                        Button("清除自动活动", role: .destructive) { confirmClear = true }.buttonStyle(.plain).font(.system(size: 11))
                     }
-                    SecureField(store.keyAvailable ? "输入新密钥以替换；留空保留原密钥" : "填写 API 密钥；本地免鉴权接口可留空", text: $key)
-                        .textFieldStyle(.roundedBorder).padding(.top, -9)
-                        .onChange(of: key) { _, _ in replaceKey = !key.isEmpty; saved = false }
-                    if store.keyAvailable {
-                        Button("删除已保存的密钥", role: .destructive) { confirmDeleteKey = true }
-                            .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Theme.accent).padding(.top, -7)
-                    }
-                }.frame(maxWidth: 610, alignment: .leading)
-                HStack {
-                    Button("保存设置") { save() }.buttonStyle(AccentButtonStyle())
-                    if saved { Label("已保存", systemImage: "checkmark").font(.system(size: 12)).foregroundStyle(Theme.muted) }
-                    Spacer()
+                    Text("记录和小结保存在本机；密钥保存在系统钥匙串。导出包含活动文字及旧版个人记录，分享前请检查。应用不持久化截图，模型服务端留存取决于服务提供方。").font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5)
+                    Text("本机识别诊断仅保留最近 200 次的时间、阶段、结果和脱敏错误码，不含截图、窗口标题、接口地址或响应正文。清除自动活动时一并备份并清除。")
+                        .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5)
+                    if let warning = activity.diagnosticWarning { Text(warning).font(.system(size: 11)).foregroundStyle(Theme.accent) }
                 }
-                Text("手动计时无需 AI 接口。自动记录仅在你授权并开启后发送前台窗口截图；复盘仍由你手动生成。")
-                    .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5)
-                Rectangle().fill(Theme.line).frame(height: 1)
-                sectionTitle("本地数据", symbol: "externaldrive")
-                HStack(spacing: 12) {
-                    Button("打开数据文件夹") { store.openDataDirectory() }.buttonStyle(QuietButtonStyle())
-                    Button("导出全部记录") { store.exportSessions() }.buttonStyle(QuietButtonStyle()).disabled(store.data.sessions.isEmpty)
-                }
-                Text("记录和复盘保存在这台 Mac，密钥单独存入系统钥匙串。退出后计时会根据实际时间恢复；关闭应用或电脑睡眠期间，未暂停的时间仍会计入。离开工作前请先暂停。")
-                    .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(5).fixedSize(horizontal: false, vertical: true)
-                Text("专注镜 \(appVersion) · 独立开发的专注工具").font(.system(size: 10)).foregroundStyle(Theme.muted).padding(.top, 8)
-            }.padding(24).padding(.top, 4)
-        }
-        .sheet(isPresented: $tagManagerOpen) { TagManagerView().environmentObject(store) }
-        .onAppear {
-            focus = store.data.focusMinutes
-            rest = store.data.restMinutes
-            baseURL = store.data.aiSettings.baseURL
-            model = store.data.aiSettings.model
-        }
-        .onChange(of: focus) { _, _ in saved = false }
-        .onChange(of: rest) { _, _ in saved = false }
-        .onChange(of: baseURL) { _, _ in saved = false }
-        .onChange(of: model) { _, _ in saved = false }
-        .confirmationDialog("从系统钥匙串删除 AI 密钥？", isPresented: $confirmDeleteKey, titleVisibility: .visible) {
-            Button("删除密钥", role: .destructive) {
-                do {
-                    try store.deleteAIKey()
-                    key = ""
-                    replaceKey = false
-                } catch { store.errorMessage = error.localizedDescription }
+                Text("专注镜 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版") · 自动活动日志").font(.system(size: 10)).foregroundStyle(Theme.muted)
+            }.padding(30)
+        }.onAppear { modelExpanded = !activity.verified }
+            .sheet(isPresented: $showArchive) { LegacyArchiveView() }
+            .sheet(isPresented: $showRecordingConsent) { recordingSheet }
+            .confirmationDialog("允许自动小结发送文字记录？", isPresented: $showSummaryConsent, titleVisibility: .visible) {
+                Button("同意并开启") { _ = summary.enable(consent: true) }
+                Button("取消", role: .cancel) { }
+            } message: {
+                Text("接收方：\(activity.config.ai.baseURL)\n模型：\(activity.config.ai.model)\n将发送当天活动的时间、类别、应用名和文字概括，不发送历史截图。每天最多 3 次，可随时关闭。")
             }
-            Button("取消", role: .cancel) { }
+            .confirmationDialog("清除所有自动活动与小结？", isPresented: $confirmClear, titleVisibility: .visible) {
+                Button("备份后清除", role: .destructive) { _ = store.clearAutomaticData() }
+                Button("取消", role: .cancel) { }
+            } message: { Text("将先保存本机完整备份，然后关闭记录与小结并清除活动。旧版手动归档保留。备份仍包含这些数据；此操作不是安全擦除，也不会删除模型服务端的数据。") }
+    }
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 20) { Text(title).font(.system(size: 15, weight: .semibold)); content() }
+            .padding(.top, 23).overlay(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 1) }
+    }
+    private func row<Control: View>(_ title: String, detail: String, @ViewBuilder control: () -> Control) -> some View {
+        HStack(spacing: 30) {
+            VStack(alignment: .leading, spacing: 7) { Text(title).font(.system(size: 12, weight: .medium)); Text(detail).font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(4) }.frame(maxWidth: .infinity, alignment: .leading)
+            control()
         }
     }
+    private var recordingSheet: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("开启自动记录").font(.system(size: 23, weight: .semibold))
+            Text("接收方：\(activity.config.ai.baseURL)\n模型：\(activity.config.ai.model)").font(.system(size: 12)).textSelection(.enabled)
+            Text(activity.verified ? "图片理解已通过。截图只在内存处理；服务端留存取决于所选服务。" : "请先关闭此窗口，在识别服务中保存配置并通过图片理解测试。").font(.system(size: 12)).foregroundStyle(Theme.muted).lineSpacing(5)
+            Button(activity.hasPermission ? "屏幕录制已允许" : "允许屏幕录制") { activity.requestPermission() }.disabled(activity.hasPermission)
+            Toggle("同意向上述服务发送前台窗口截图", isOn: $recordingConsent).font(.system(size: 12))
+            HStack { Spacer(); Button("取消") { showRecordingConsent = false }.buttonStyle(QuietButtonStyle()); Button("同意并开启") { activity.enable(consent: recordingConsent); showRecordingConsent = !activity.config.enabled }.buttonStyle(AccentButtonStyle()).disabled(!recordingConsent || !activity.verified || !activity.hasPermission) }
+        }.padding(30).frame(width: 540).background(Theme.background)
+    }
+}
 
-    private func sectionTitle(_ title: String, symbol: String) -> some View {
-        Label(title, systemImage: symbol).font(.system(size: 15, weight: .semibold))
-    }
-    private func labeledField(_ label: String, placeholder: String, text: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text(label).font(.system(size: 12, weight: .medium))
-            TextField(placeholder, text: text).textFieldStyle(.roundedBorder)
-        }
-    }
-    private func durationField(_ label: String, value: Binding<Int>, range: ClosedRange<Int>) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(label).font(.system(size: 12)).foregroundStyle(Theme.muted)
-            HStack(spacing: 8) {
-                TextField("分钟", value: value, format: .number).textFieldStyle(.roundedBorder).frame(width: 58)
-                Stepper("", value: value, in: range).labelsHidden()
-                Text("分钟").font(.system(size: 12)).foregroundStyle(Theme.muted)
+struct LegacyArchiveView: View {
+    @EnvironmentObject private var store: FocusStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack { PageTitle(title: "旧版只读归档", subtitle: "原记录保留，不再创建轮次，也不混入自动统计。"); Spacer(); Button("关闭") { dismiss() }.buttonStyle(QuietButtonStyle()) }
+            TextField("搜索目标、标签、反馈或旧复盘", text: $query).textFieldStyle(.roundedBorder)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    if let transition = store.data.legacyTransition {
+                        if let run = transition.activeRun { DisclosureGroup("升级时已停止的轮次 · \(goalDisplayText(run.goal))") {
+                            Text("开始于 \(run.startedAt.formatted())\n停止时有效时长：\(durationText(run.elapsed(at: transition.migratedAt)))\n原标签：\(run.kind.displayName)\n没有生成完成情况或评分。").font(.system(size: 12)).lineSpacing(5).padding(.vertical, 10)
+                        } }
+                        if let pending = transition.pendingFeedback { DisclosureGroup("升级时待反馈 · \(goalDisplayText(pending.goal))") { Text("\(durationText(pending.focusSeconds)) · \(pending.kind.displayName)\n结束于 \(pending.endedAt.formatted())\n反馈未填写，原样保留。").font(.system(size: 12)).lineSpacing(5).padding(.vertical, 10) } }
+                    }
+                    Text("历史手动记录 · \(store.data.sessions.count) 条").font(.system(size: 14, weight: .semibold))
+                    ForEach(store.data.sessions.filter { query.isEmpty || ($0.goal + $0.note + $0.kind.displayName).localizedCaseInsensitiveContains(query) }.sorted { $0.startedAt > $1.startedAt }) { session in
+                        DisclosureGroup(goalDisplayText(session.goal)) {
+                            Text("\(session.startedAt.formatted()) · \(session.kind.displayName)\n有效时长：\(durationText(session.focusSeconds)) · 原反馈：\(session.outcome.rawValue)\n原自评分：\(session.rating.map(String.init) ?? "未填写")\n备注：\(session.note.isEmpty ? "未填写" : session.note)")
+                                .font(.system(size: 12)).lineSpacing(5).textSelection(.enabled).padding(.vertical, 10)
+                        }
+                    }
+                    Divider()
+                    Text("旧版复盘 · \(store.data.reviews.count) 份").font(.system(size: 14, weight: .semibold))
+                    ForEach(store.data.reviews.filter { query.isEmpty || $0.transcript.localizedCaseInsensitiveContains(query) }) { review in
+                        DisclosureGroup("\(review.createdAt.formatted(.dateTime.month().day().hour().minute())) · \(review.model)") {
+                            Text(review.transcript).font(.system(size: 12)).lineSpacing(5).textSelection(.enabled).padding(.vertical, 10)
+                        }
+                    }
+                    if store.data.sessions.isEmpty && store.data.reviews.isEmpty { Text("没有旧版历史记录。").font(.system(size: 12)).foregroundStyle(Theme.muted) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }
-        }
-    }
-    private func save() {
-        do {
-            let settings = AISettings(baseURL: baseURL.trimmingCharacters(in: .whitespacesAndNewlines), model: model.trimmingCharacters(in: .whitespacesAndNewlines))
-            try store.updateAI(settings: settings, newKey: replaceKey ? key.trimmingCharacters(in: .whitespacesAndNewlines) : nil)
-            store.updateDurations(focus: focus, rest: rest)
-            focus = store.data.focusMinutes
-            rest = store.data.restMinutes
-            key = ""
-            replaceKey = false
-            saved = store.errorMessage == nil
-        } catch { store.errorMessage = error.localizedDescription }
+            HStack { Text("导出包含新活动、小结和全部旧版归档，不含密钥。").font(.system(size: 10)).foregroundStyle(Theme.muted); Spacer(); Button("导出全部记录") { store.exportAll() }.buttonStyle(QuietButtonStyle()) }
+        }.padding(30).frame(width: 720, height: 580).background(Theme.background)
     }
 }

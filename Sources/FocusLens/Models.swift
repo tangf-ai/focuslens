@@ -153,8 +153,15 @@ struct Review: Codable, Identifiable {
     }
 }
 
+struct LegacyTransition: Codable {
+    var migratedAt: Date
+    var activeRun: TimerRun?
+    var pendingFeedback: SessionDraft?
+    var backupFolder: String
+}
+
 struct AppData: Codable {
-    var schemaVersion = 2
+    var schemaVersion = 3
     var sessions: [FocusSession] = []
     var activeRun: TimerRun?
     var pendingFeedback: SessionDraft?
@@ -164,10 +171,11 @@ struct AppData: Codable {
     var reviews: [Review] = []
     var taskKinds = TaskKind.allCases
     var selectedKind: TaskKind = .development
+    var legacyTransition: LegacyTransition?
 
     init() { }
     enum CodingKeys: String, CodingKey {
-        case schemaVersion, sessions, activeRun, pendingFeedback, focusMinutes, restMinutes, aiSettings, reviews, taskKinds, selectedKind
+        case schemaVersion, sessions, activeRun, pendingFeedback, focusMinutes, restMinutes, aiSettings, reviews, taskKinds, selectedKind, legacyTransition
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -182,6 +190,7 @@ struct AppData: Codable {
         taskKinds = try values.decodeIfPresent([TaskKind].self, forKey: .taskKinds) ?? TaskKind.allCases
         let saved = try values.decodeIfPresent(TaskKind.self, forKey: .selectedKind) ?? .development
         selectedKind = taskKinds.contains(saved) ? saved : .uncategorized
+        legacyTransition = try values.decodeIfPresent(LegacyTransition.self, forKey: .legacyTransition)
     }
 }
 

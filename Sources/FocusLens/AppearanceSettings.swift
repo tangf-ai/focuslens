@@ -47,14 +47,7 @@ struct AppearanceSettings: View {
                 }
             }
             Divider().overlay(Theme.line)
-            Picker("浮窗样式", selection: binding(\.style)) { ForEach(FloatingStyle.allCases) { Text($0.name).tag($0) } }
-                .pickerStyle(.segmented).frame(maxWidth: 420)
-            Picker("浮窗背景", selection: binding(\.glow)) { Text("主题柔光").tag(true); Text("纯色").tag(false) }
-                .pickerStyle(.segmented).frame(maxWidth: 420)
-            Picker("动态效果", selection: binding(\.gentleMotion)) { Text("轻动态").tag(true); Text("静态").tag(false) }
-                .pickerStyle(.segmented).frame(maxWidth: 420)
-            Toggle("跟随系统减少动态效果", isOn: binding(\.followsReducedMotion)).font(.system(size: 12))
-            Text("主窗口和两个浮窗同步切换。暂停、隐藏、被遮挡或低电量模式下停止装饰动画；时间仍按实际经过时间计算。")
+            Text("主窗口和轻量活动浮窗同步切换主题；浮窗不再使用圆环、倒计时或装饰动画。")
                 .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(4)
             DisclosureGroup("大小与圆角") {
                 VStack(alignment: .leading, spacing: 12) {

@@ -64,7 +64,7 @@ extension FocusLensTests {
         store.persist()
         let original = try Data(contentsOf: directory.appendingPathComponent("focus-data.json"))
         let restored = FocusStore(directory: directory, startClock: false)
-        XCTAssertFalse(restored.isGenerating)
+        XCTAssertFalse(restored.summary.isGenerating)
         XCTAssertEqual(restored.data.reviews[0].messages?[1].state, .cancelled)
         XCTAssertEqual(restored.data.reviews[0].evidence, [sample])
         XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("focus-data.json")), original)
@@ -112,76 +112,6 @@ extension FocusLensTests {
         XCTAssertTrue(!text.isEmpty)
     }
 
-    @MainActor func testStoreStreamingConversationPersistence() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let store = FocusStore(directory: directory, startClock: false, aiKeyProvider: { "test-secret" })
-        store.data.sessions = [streamSample()]
-        store.data.aiSettings = streamSettings("stream", model: "conversation-check")
-        let id = try XCTUnwrap(store.generateReview(period: .today))
-        var unrelatedUpdates = 0
-        let observation = store.objectWillChange.sink { unrelatedUpdates += 1 }
-        defer { observation.cancel() }
-        let deadline = Date().addingTimeInterval(5)
-        while store.streamingText.isEmpty && store.isGenerating && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
-        XCTAssertTrue(store.isGenerating && !store.streamingText.isEmpty)
-        XCTAssertEqual(unrelatedUpdates, 0)
-        // Chunk updates live in memory, not in the JSON file.
-        let inFlight = try JSONDecoder().decode(AppData.self, from: Data(contentsOf: directory.appendingPathComponent("focus-data.json")))
-        XCTAssertEqual(inFlight.reviews[0].content, "")
-        try await awaitReview(store)
-        XCTAssertEqual(store.data.reviews[0].state, .complete)
-        XCTAssertEqual(store.data.reviews[0].evidence, store.data.sessions)
-        let originalGoal = store.data.sessions[0].goal
-        store.data.sessions[0].goal = "生成后修改的目标"
-        XCTAssertTrue(store.sendReviewQuestion(reviewID: id, question: "下一轮如何安排？"))
-        try await awaitReview(store)
-        XCTAssertTrue(store.sendReviewQuestion(reviewID: id, question: "把建议拆成两个步骤"))
-        try await awaitReview(store)
-        let restored = FocusStore(directory: directory, startClock: false)
-        XCTAssertEqual(restored.data.reviews[0].messages?.count, 4)
-        XCTAssertEqual(restored.data.reviews[0].messages?.last?.state, .complete)
-        let url = URL(string: streamSettings("stream").baseURL)!.deletingLastPathComponent().appendingPathComponent("requests")
-        let (data, _) = try await URLSession.shared.data(from: url)
-        let records = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
-        let conversations = records.filter { ($0["body"] as? [String: Any])?["model"] as? String == "conversation-check" }
-        XCTAssertEqual(conversations.count, 3)
-        XCTAssertTrue(conversations.allSatisfy { $0["authorized"] as? Bool == true })
-        let last = try XCTUnwrap(conversations.last?["body"] as? [String: Any])
-        let messages = try XCTUnwrap(last["messages"] as? [[String: String]])
-        XCTAssertEqual(messages.count, 6)
-        guard messages.count == 6 else { return }
-        XCTAssertTrue(messages[1]["content"]!.contains(originalGoal))
-        XCTAssertFalse(messages[1]["content"]!.contains("生成后修改的目标"))
-        XCTAssertEqual(messages[3]["content"], "下一轮如何安排？")
-        store.data.aiSettings = streamSettings("slow")
-        XCTAssertTrue(store.sendReviewQuestion(reviewID: id, question: "停止这次回复"))
-        let stopDeadline = Date().addingTimeInterval(3)
-        while store.streamingText.isEmpty && store.isGenerating && Date() < stopDeadline { try await Task.sleep(for: .milliseconds(20)) }
-        store.cancelReview()
-        let stopped = try JSONDecoder().decode(AppData.self, from: Data(contentsOf: directory.appendingPathComponent("focus-data.json")))
-        XCTAssertEqual(stopped.reviews[0].messages?.last?.state, .cancelled)
-        XCTAssertTrue(!(stopped.reviews[0].messages?.last?.content ?? "").isEmpty)
-        try await awaitReview(store)
-        XCTAssertEqual(store.data.reviews[0].messages?.last?.state, .cancelled)
-        XCTAssertTrue(!(store.data.reviews[0].messages?.last?.content ?? "").isEmpty)
-        let ending = FocusStore(directory: directory, startClock: true, aiKeyProvider: { "test-secret" })
-        XCTAssertTrue(ending.sendReviewQuestion(reviewID: id, question: "退出期间保存"))
-        let exitDeadline = Date().addingTimeInterval(3)
-        while ending.streamingText.isEmpty && ending.isGenerating && Date() < exitDeadline { try await Task.sleep(for: .milliseconds(20)) }
-        XCTAssertTrue(!ending.streamingText.isEmpty)
-        NotificationCenter.default.post(name: NSApplication.willTerminateNotification, object: nil)
-        let exiting = try JSONDecoder().decode(AppData.self, from: Data(contentsOf: directory.appendingPathComponent("focus-data.json")))
-        XCTAssertEqual(exiting.reviews[0].messages?.last?.state, .cancelled)
-        XCTAssertTrue(!(exiting.reviews[0].messages?.last?.content ?? "").isEmpty)
-        try await awaitReview(ending)
-    }
-
-    @MainActor private func awaitReview(_ store: FocusStore) async throws {
-        let deadline = Date().addingTimeInterval(8)
-        while store.isGenerating && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
-        XCTAssertFalse(store.isGenerating)
-    }
     private func streamSettings(_ route: String, model: String = "stream-test") -> AISettings {
         let port = ProcessInfo.processInfo.environment["FOCUSLENS_TEST_PORT"]!
         return AISettings(baseURL: "http://127.0.0.1:\(port)/\(route)", model: model)

@@ -17,6 +17,8 @@
 focus-data.json
 automatic-settings.json
 automatic-idle-periods.json
+automatic-summaries.json
+recognition-diagnostics.json
 appearance-settings.json
 automatic-activities/
 *-export.json

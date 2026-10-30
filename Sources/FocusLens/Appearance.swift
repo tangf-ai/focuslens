@@ -38,11 +38,11 @@ struct AppearancePreferences: Codable, Equatable {
     var glow = true
     var gentleMotion = true
     var followsReducedMotion = true
-    var width: Double = 332
-    var radius: Double = 27
+    var width: Double = 290
+    var radius: Double = 16
     mutating func normalize() {
-        width = width.isFinite ? min(360, max(290, width)) : 332
-        radius = radius.isFinite ? min(36, max(16, radius)) : 27
+        width = width.isFinite ? min(360, max(290, width)) : 290
+        radius = radius.isFinite ? min(36, max(16, radius)) : 16
     }
     func animates(active: Bool, visible: Bool, reducedMotion: Bool, lowPower: Bool) -> Bool {
         gentleMotion && active && visible && !lowPower && !(followsReducedMotion && reducedMotion)

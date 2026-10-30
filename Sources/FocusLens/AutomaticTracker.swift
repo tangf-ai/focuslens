@@ -15,12 +15,10 @@ final class AutomaticTracker: ObservableObject {
     @Published private(set) var testing = false
     @Published private(set) var testMessage = "尚未测试图片理解"
     @Published var errorMessage: String?
-    @Published var editingSegment: ActivitySegment?
-    @Published private(set) var reminderVisible = false
     @Published private(set) var keyAvailable = false
-    @Published private(set) var undoSnapshot: ActivitySegment?
     @Published private(set) var inactivityPeriods: [InactivityPeriod] = []
-    var pendingInactivityPeriods: [InactivityPeriod] { inactivityPeriods.filter { $0.end != nil && $0.resolution == .pending && $0.seconds > 0 }.reversed() }
+    @Published private(set) var recognitionDiagnostics: [RecognitionDiagnostic] = []
+    @Published private(set) var diagnosticWarning: String?
     var openMain: (() -> Void)?
     private let directory: URL
     private let keyScope: String
@@ -39,26 +37,28 @@ final class AutomaticTracker: ObservableObject {
     private var explicitlyAway = false
     private var lifecycleBlocks: Set<String> = []
     private var away: Bool { explicitlyAway || !lifecycleBlocks.isEmpty }
-    private var manual = false
-    private var restUntil: Date?
     private var front: ForegroundContext?
+    private var frontWindow: CGWindowID?
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var floating: ActivityFloatingController?
     private var lastFrameKey: String?
     private var lastFingerprint: Data?
-    private var lastInputApp: String?
-    private var override: (key: String, value: ActivityClassification)?
     private var savedHashes: [String: String] = [:]
     private var writable = true
-    private var lastReminderID: UUID?
     private var storedDisplay: ActivitySegment?
     private var lastAttempt: Date?
+    private var pendingWindowID: CGWindowID?
+    private var consecutiveFailures = 0
+    private var activeDiagnostic: RecognitionDiagnostic?
+    private var diagnosticsWritable = true
     private let capture: (ForegroundContext) async throws -> MemoryScreenCapture.Frame
     private let analyze: (Data, AutomaticConfig, String?) async throws -> ActivityClassification
     private let permission: () -> Bool
     private let foreground: () -> ForegroundContext?
+    private let foregroundWindowID: (ForegroundContext) -> CGWindowID?
     private let sessionAvailable: () -> Bool
     var display: ActivitySegment? { ledger.current ?? storedDisplay }
+    var observationDate: Date { clock() }
     var current: ActivitySegment? { ledger.current }
     func liveSegment(at date: Date? = nil) -> ActivitySegment? {
         let date = date ?? clock()
@@ -69,10 +69,6 @@ final class AutomaticTracker: ObservableObject {
     }
     var verified: Bool { config.verifiedSignature == VisionService.signature(config) }
     var hasPermission: Bool { permission() }
-    var canRefresh: Bool {
-        guard config.enabled, !isRecognizing else { return false }
-        switch status { case .recording, .uncertain, .waiting, .recognizing, .error: return true; default: return false }
-    }
     func recognitionDetail(at date: Date? = nil) -> String {
         let date = date ?? clock()
         if case .error(let message) = status { return message }
@@ -92,6 +88,7 @@ final class AutomaticTracker: ObservableObject {
     private var configURL: URL { directory.appendingPathComponent("automatic-settings.json") }
     private var recordsDirectory: URL { directory.appendingPathComponent("automatic-activities", isDirectory: true) }
     private var inactivityURL: URL { directory.appendingPathComponent("automatic-idle-periods.json") }
+    private var diagnosticsURL: URL { directory.appendingPathComponent("recognition-diagnostics.json") }
 
     init(directory: URL, startClock: Bool = true,
          idleSeconds: @escaping () -> TimeInterval = SystemInactivity.seconds,
@@ -100,6 +97,7 @@ final class AutomaticTracker: ObservableObject {
          permission: @escaping () -> Bool = { MemoryScreenCapture.allowed },
          sessionAvailable: @escaping () -> Bool = { MemoryScreenCapture.sessionAvailable },
          foreground: @escaping () -> ForegroundContext? = { ForegroundContext.current() },
+         foregroundWindowID: @escaping (ForegroundContext) -> CGWindowID? = { MemoryScreenCapture.currentWindowID($0) },
          capture: @escaping (ForegroundContext) async throws -> MemoryScreenCapture.Frame = { try await MemoryScreenCapture.capture($0) },
          analyze: @escaping (Data, AutomaticConfig, String?) async throws -> ActivityClassification = { try await VisionService.classify(image: $0, settings: $1.ai, key: $2, workBackground: $1.workBackground, rules: $1.classificationRules) }) {
         self.directory = directory; self.clockEnabled = startClock
@@ -107,8 +105,11 @@ final class AutomaticTracker: ObservableObject {
         self.appearance = appearance ?? AppearanceStore(directory: directory)
         self.keyScope = "vision:" + directory.standardizedFileURL.path
         self.permission = permission; self.sessionAvailable = sessionAvailable; self.foreground = foreground; self.capture = capture; self.analyze = analyze
+        self.foregroundWindowID = foregroundWindowID
         load()
-        paused = config.pausedByUser; restUntil = config.snoozeUntil
+        loadDiagnostics()
+        paused = config.pausedByUser
+        config.snoozeUntil = nil; config.reminders = false
         keyAvailable = (try? Keychain.read(scope: keyScope))?.isEmpty == false
         if verified { testMessage = "图片理解测试通过（已保存）" }
         if startClock { observe(); reconcile() }
@@ -125,6 +126,32 @@ final class AutomaticTracker: ObservableObject {
         return formatter.string(from: date)
     }
     private static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+    private func loadDiagnostics() {
+        guard FileManager.default.fileExists(atPath: diagnosticsURL.path) else { return }
+        do {
+            recognitionDiagnostics = Array(try JSONDecoder().decode([RecognitionDiagnostic].self, from: Data(contentsOf: diagnosticsURL)).suffix(200))
+        } catch {
+            diagnosticsWritable = false
+            diagnosticWarning = "识别诊断文件无法读取，已停止覆盖；活动记录不受影响。"
+        }
+    }
+
+    private func finishRecognition(_ outcome: RecognitionDiagnostic.Outcome, code: String? = nil) {
+        guard var entry = activeDiagnostic else { return }
+        activeDiagnostic = nil
+        entry.endedAt = clock(); entry.outcome = outcome; entry.code = code
+        recognitionDiagnostics.append(entry)
+        recognitionDiagnostics = Array(recognitionDiagnostics.suffix(200))
+        guard diagnosticsWritable else { return }
+        do {
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            try encoder.encode(recognitionDiagnostics).write(to: diagnosticsURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: diagnosticsURL.path)
+        } catch {
+            diagnosticsWritable = false
+            diagnosticWarning = "识别诊断暂无法保存；活动记录继续，请检查数据目录。"
+        }
+    }
     private func load() {
         do {
             if FileManager.default.fileExists(atPath: configURL.path) { config = try JSONDecoder().decode(AutomaticConfig.self, from: Data(contentsOf: configURL)) }
@@ -183,12 +210,20 @@ final class AutomaticTracker: ObservableObject {
     }
 
     func segments(in interval: DateInterval) -> [ActivitySegment] {
+        (try? readSegments(in: interval)) ?? []
+    }
+
+    func readSegments(in interval: DateInterval) throws -> [ActivitySegment] {
         var stored: [ActivitySegment] = []
         var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         var date = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: interval.start))!
         while date < interval.end {
             let file = recordsDirectory.appendingPathComponent(Self.dayKey(date) + ".json")
-            if let data = try? Data(contentsOf: file), let items = try? JSONDecoder().decode([ActivitySegment].self, from: data) { stored += items }
+            if FileManager.default.fileExists(atPath: file.path) {
+                let items = try JSONDecoder().decode([ActivitySegment].self, from: Data(contentsOf: file))
+                guard items.allSatisfy({ $0.end >= $0.start }) else { throw AutomaticError.invalidResponse }
+                stored += items
+            }
             date = calendar.date(byAdding: .day, value: 1, to: date)!
         }
         var byID = Dictionary(stored.map { ($0.id, $0) }, uniquingKeysWith: { _, newer in newer })
@@ -198,6 +233,53 @@ final class AutomaticTracker: ObservableObject {
             item.start = max(item.start, interval.start); item.end = min(item.end, interval.end)
             return item.end > item.start ? item : nil
         }.sorted { $0.start > $1.start }
+    }
+
+    func allSegments() throws -> [ActivitySegment] {
+        var records: [UUID: ActivitySegment] = [:]
+        if FileManager.default.fileExists(atPath: recordsDirectory.path) {
+            for file in try FileManager.default.contentsOfDirectory(at: recordsDirectory, includingPropertiesForKeys: nil) where file.pathExtension == "json" {
+                for segment in try JSONDecoder().decode([ActivitySegment].self, from: Data(contentsOf: file)) {
+                    guard segment.end >= segment.start else { throw AutomaticError.invalidResponse }
+                    records[segment.id] = segment
+                }
+            }
+        }
+        for segment in ledger.segments { records[segment.id] = segment }
+        return records.values.sorted { $0.start < $1.start }
+    }
+
+    // The caller creates a complete backup before invoking this destructive operation.
+    func clearActivities() throws {
+        disable()
+        guard writable else { throw AutomaticError.invalidResponse }
+        for url in [recordsDirectory, inactivityURL, diagnosticsURL] where FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        ledger = ActivityLedger(); ledger.maximumGap = config.maximumObservationGap
+        inactivityPeriods = []; inactiveID = nil; storedDisplay = nil
+        savedHashes = [:]; lastFingerprint = nil; lastFrameKey = nil; lastIdentified = nil
+        recognitionDiagnostics = []; diagnosticsWritable = true; diagnosticWarning = nil
+        guard persist() else { throw AutomaticError.invalidResponse }
+    }
+
+    @discardableResult
+    func saveGuidance(workBackground: String?, classificationRules: String?) -> Bool {
+        guard writable else { return false }
+        // Save only guidance, even if the model settings are not configured yet.
+        var updated = config
+        updated.workBackground = workBackground
+        updated.classificationRules = classificationRules
+        updated.normalizeGuidance()
+        guard updated != config else { return true }
+        cancelWork()
+        finishInactivity(at: clock())
+        guard writable else { return false }
+        lastFingerprint = nil
+        config = updated
+        guard persist() else { return false }
+        reconcile()
+        return true
     }
 
     @discardableResult
@@ -225,7 +307,6 @@ final class AutomaticTracker: ObservableObject {
                 keyAvailable = !key.isEmpty
             }
             // Re-analyze even an unchanged screenshot with the new instructions.
-            // Manual corrections remain authoritative until their window context changes.
             if updated.workBackground != config.workBackground || updated.classificationRules != config.classificationRules {
                 lastFingerprint = nil
             }
@@ -273,27 +354,12 @@ final class AutomaticTracker: ObservableObject {
         guard consent else { errorMessage = AutomaticError.noConsent.localizedDescription; return }
         guard permission() else { errorMessage = AutomaticError.permission.localizedDescription; return }
         config.consentSignature = VisionService.signature(config); config.enabled = true; paused = false
-        config.pausedByUser = false; restUntil = nil; config.snoozeUntil = nil
+        config.pausedByUser = false; config.snoozeUntil = nil
         persist(); reconcile(); showFloating()
     }
-    func disable() { cancelWork(); restUntil = nil; config.snoozeUntil = nil; config.enabled = false; persist(); reconcile() }
-    func pause() { finishInactivity(at: clock()); setInactivityTimer(active: false); paused = true; config.pausedByUser = true; restUntil = nil; config.snoozeUntil = nil; cancelWork(); status = .paused; floating?.refresh() }
-    func resume() { paused = false; config.pausedByUser = false; restUntil = nil; config.snoozeUntil = nil; persist(); reconcile() }
-    func rest() { finishInactivity(at: clock()); setInactivityTimer(active: false); cancelWork(); paused = false; config.pausedByUser = false; restUntil = clock().addingTimeInterval(300); config.snoozeUntil = restUntil; reminderVisible = false; persist(); status = .resting(restUntil!); schedule(after: 300); floating?.refresh() }
-    func ignoreReminder() { reminderVisible = false; lastReminderID = ledger.currentID; floating?.refresh() }
-    func updateReminder() {
-        guard !reminderVisible, config.reminders, let current = ledger.current,
-              current.category != .unknown, current.id != lastReminderID else { return }
-        if status == .recording || status == .uncertain {
-            if (liveSegment()?.seconds ?? 0) >= Double(config.reminderMinutes * 60) { reminderVisible = true }
-        }
-    }
-    func setManualBlocked(_ blocked: Bool, at date: Date? = nil) {
-        let date = date ?? clock()
-        guard blocked != manual else { return }
-        if blocked { restUntil = nil; config.snoozeUntil = nil }
-        cancelWork(at: date); manual = blocked; reconcile()
-    }
+    func disable() { cancelWork(); finishInactivity(at: clock()); config.snoozeUntil = nil; config.enabled = false; persist(); reconcile() }
+    func pause() { finishInactivity(at: clock()); setInactivityTimer(active: false); paused = true; config.pausedByUser = true; cancelWork(); status = .paused; floating?.refresh() }
+    func resume() { paused = false; config.pausedByUser = false; config.snoozeUntil = nil; persist(); reconcile() }
     func showFloating() { guard clockEnabled else { return }; if floating == nil { floating = ActivityFloatingController(tracker: self) }; floating?.present() }
     func moveFloatingToCurrentScreen() {
         guard config.enabled else { return }
@@ -302,36 +368,13 @@ final class AutomaticTracker: ObservableObject {
     func installFloating() {
         if clockEnabled, floating == nil { floating = ActivityFloatingController(tracker: self); floating?.refresh() }
     }
-    func edit(_ segment: ActivitySegment) { editingSegment = segment; openMain?() }
-    func correct(id: UUID, category: ActivityCategory, title: String) {
-        if !ledger.segments.contains(where: { $0.id == id }), let snapshot = editingSegment, snapshot.id == id {
-            let file = recordsDirectory.appendingPathComponent(Self.dayKey(snapshot.start) + ".json")
-            guard let bytes = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode([ActivitySegment].self, from: bytes) else { errorMessage = "活动文件无法读取，未覆盖原记录。"; return }
-            let existing = Set(ledger.segments.map(\.id)); ledger.segments += saved.filter { !existing.contains($0.id) }
-        }
-        undoSnapshot = ledger.segments.first { $0.id == id }
-        ledger.correct(id: id, category: category, title: title)
-        if let segment = ledger.segments.first(where: { $0.id == id }), segment.bundleID == lastInputApp, let key = lastFrameKey {
-            override = (key, ActivityClassification(category: category, title: segment.title))
-        }
-        if storedDisplay?.id == id { storedDisplay = ledger.segments.first { $0.id == id } }
-        editingSegment = nil; persist(); floating?.refresh()
-    }
-    func undoCorrection() {
-        guard let previous = undoSnapshot else { return }
-        if !ledger.segments.contains(where: { $0.id == previous.id }) {
-            let url = recordsDirectory.appendingPathComponent(Self.dayKey(previous.start) + ".json")
-            guard let data = try? Data(contentsOf: url), let records = try? JSONDecoder().decode([ActivitySegment].self, from: data) else { return }
-            let ids = Set(ledger.segments.map(\.id)); ledger.segments += records.filter { !ids.contains($0.id) }
-        }
-        ledger.restoreClassification(previous); override = nil; undoSnapshot = nil; persist(); floating?.refresh()
-    }
-
-    private func cancelWork(at date: Date? = nil) {
+    private func cancelWork(at date: Date? = nil, reason: String = "state_changed") {
         let date = date ?? clock()
+        finishRecognition(.cancelled, code: reason)
+        pendingWindowID = nil; consecutiveFailures = 0
         revision = UUID(); task?.cancel(); task = nil; timer?.invalidate(); timer = nil
         isRecognizing = false; recognitionStartedAt = nil
-        ledger.stop(at: date); storedDisplay = ledger.segments.max { $0.end < $1.end }; reminderVisible = false
+        ledger.stop(at: date); storedDisplay = ledger.segments.max { $0.end < $1.end }
         if config.enabled { persist() }
     }
     func shutdown() { finishInactivity(at: clock()); inactivityTimer?.invalidate(); cancelWork(); testTask?.cancel() }
@@ -393,7 +436,7 @@ final class AutomaticTracker: ObservableObject {
         ledger.stopAtInactivityBoundary(start)
         cancelWork(at: start)
         let period = InactivityPeriod(start: start, observedThrough: date, category: category,
-                                      title: snapshot?.title ?? "无操作前的活动待确认", app: app.name, bundleID: app.bundleID)
+                                      title: snapshot?.title ?? "无操作前的活动未识别", app: app.name, bundleID: app.bundleID, resolution: .away, applied: true)
         inactivityPeriods.append(period); inactiveID = period.id
         persistInactivity()
         return true
@@ -458,26 +501,6 @@ final class AutomaticTracker: ObservableObject {
         }
     }
 
-    func resolveInactivity(id: UUID, wasPresent: Bool) {
-        guard writable, let index = inactivityPeriods.firstIndex(where: { $0.id == id }),
-              inactivityPeriods[index].end != nil, inactivityPeriods[index].resolution == .pending else { return }
-        let previous = inactivityPeriods[index]
-        inactivityPeriods[index].resolution = wasPresent ? .present : .away
-        if wasPresent { inactivityPeriods[index].restoredSegments = previous.segmentsForConfirmation() }
-        // Write the decision and stable segment IDs before touching the activity files.
-        guard persistInactivity() else { inactivityPeriods[index] = previous; return }
-        do {
-            if wasPresent { try mergeConfirmedInactivity(inactivityPeriods[index]) }
-            guard persist() else { return }
-            inactivityPeriods[index].applied = true
-            persistInactivity(); floating?.refresh()
-        } catch {
-            writable = false; task?.cancel(); timer?.invalidate(); inactivityTimer?.invalidate()
-            errorMessage = "空闲补记读取失败，未覆盖历史；确认结果已保存，修复数据文件后重启可重试。"
-            status = .error(errorMessage!)
-        }
-    }
-
     private func observe() {
         let center = NSWorkspace.shared.notificationCenter
         let activate = center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
@@ -506,15 +529,12 @@ final class AutomaticTracker: ObservableObject {
 
     func reconcile() {
         guard !testing else { return }
-        if let until = restUntil, until > clock() { finishInactivity(at: clock()); setInactivityTimer(active: false); status = .resting(until); schedule(after: until.timeIntervalSince(clock())); return }
-        restUntil = nil
         let app = foreground()
-        let changed = app != front
+        let appChanged = app != front
         let blocked: AutomaticStatus?
         if !config.enabled || !verified || config.consentSignature != VisionService.signature(config) || !writable { blocked = .off }
         else if paused { blocked = .paused }
         else if away || !sessionAvailable() { blocked = .away }
-        else if manual { blocked = .manual }
         else if !permission() { blocked = .error(AutomaticError.permission.localizedDescription) }
         else if let app, app.bundleID == Bundle.main.bundleIdentifier { blocked = .excluded("专注镜") }
         else if let app, let name = config.excludedApps[app.bundleID] { blocked = .excluded(name) }
@@ -525,6 +545,9 @@ final class AutomaticTracker: ObservableObject {
             if ledger.currentID != nil || task != nil { cancelWork() }
             status = blocked; floating?.refresh(); return
         }
+        let window = app.flatMap { foregroundWindowID($0) }
+        let windowChanged = !appChanged && window != frontWindow
+        let changed = appChanged || windowChanged
         if observationStartedAt == nil { observationStartedAt = clock() }
         setInactivityTimer(active: config.inactivitySettings.enabled)
         if let app, updateInactivity(at: clock(), app: app) {
@@ -532,9 +555,13 @@ final class AutomaticTracker: ObservableObject {
             if status != .inactive { status = .inactive; floating?.refresh() }
             return
         }
-        if changed { cancelWork(); front = app; lastFingerprint = nil }
+        if changed {
+            cancelWork(reason: appChanged ? "app_changed" : "window_changed")
+            front = app; frontWindow = window; lastFingerprint = nil
+        }
         if ledger.currentID == nil, let app {
-            ledger.begin(ActivityClassification(category: .unknown, title: "\(app.name) · 活动待确认"), app: app.name, bundleID: app.bundleID, at: clock())
+            ledger.begin(ActivityClassification(category: .unknown, title: "\(app.name) · 等待识别"), app: app.name, bundleID: app.bundleID, at: clock(), unknownReason: .waiting)
+            pendingWindowID = window
             status = .waiting
         }
         if task == nil && timer == nil {
@@ -552,25 +579,25 @@ final class AutomaticTracker: ObservableObject {
         timer.tolerance = min(3, max(0.1, seconds / 10)); RunLoop.main.add(timer, forMode: .common); self.timer = timer
     }
 
-    func retry() {
-        guard canRefresh else { return }
-        if let lastAttempt, clock().timeIntervalSince(lastAttempt) < 5 {
-            schedule(after: max(0.2, 5 - clock().timeIntervalSince(lastAttempt))); return
-        }
-        sample()
-    }
-
     func sample() {
         reconcile()
-        guard config.enabled, !paused, !away, inactiveID == nil, !manual, !testing, restUntil == nil, task == nil,
+        guard config.enabled, !paused, !away, inactiveID == nil, !testing, task == nil,
               permission(), sessionAvailable(), let app = foreground(), app == front,
               app.bundleID != Bundle.main.bundleIdentifier, config.excludedApps[app.bundleID] == nil,
               verified, config.consentSignature == VisionService.signature(config), writable else { return }
         timer?.invalidate(); timer = nil
         lastAttempt = clock()
+        activeDiagnostic = RecognitionDiagnostic(startedAt: clock())
         let token = revision, settings = config
         let key: String?
-        do { key = try Keychain.read(scope: keyScope) } catch { status = .error(error.localizedDescription); return }
+        do { key = try Keychain.read(scope: keyScope) } catch {
+            pendingWindowID = nil; consecutiveFailures += 1
+            finishRecognition(.failure, code: "keychain")
+            ledger.begin(ActivityClassification(category: .unknown, title: "凭据读取失败"), app: app.name, bundleID: app.bundleID, at: clock(), unknownReason: .failure)
+            status = .error(error.localizedDescription); persist()
+            schedule(after: config.retryDelay(failures: consecutiveFailures))
+            return
+        }
         isRecognizing = true; recognitionStartedAt = clock()
         if ledger.current?.category != .unknown, ledger.current != nil { status = .recording }
         else { status = .recognizing }
@@ -581,7 +608,8 @@ final class AutomaticTracker: ObservableObject {
                     self.task = nil; self.isRecognizing = false; self.recognitionStartedAt = nil
                     // Cadence starts at capture, so inference time does not add another full interval.
                     let elapsed = self.lastAttempt.map { self.clock().timeIntervalSince($0) }
-                    self.schedule(after: max(1, self.config.sampleDelay(sinceLastAttempt: elapsed)))
+                    let delay = self.consecutiveFailures > 0 ? self.config.retryDelay(failures: self.consecutiveFailures) : max(1, self.config.sampleDelay(sinceLastAttempt: elapsed))
+                    self.schedule(after: delay)
                     self.floating?.refresh()
                 }
             }
@@ -594,31 +622,39 @@ final class AutomaticTracker: ObservableObject {
                 if self.lastFrameKey == frame.contextKey, self.lastFingerprint == frame.fingerprint,
                    let last = self.lastIdentified, self.clock().timeIntervalSince(last) < 600,
                    self.ledger.current?.category != .unknown {
-                    self.ledger.checkpoint(at: self.clock()); self.status = .recording; self.updateReminder(); self.persist(); return
+                    self.consecutiveFailures = 0
+                    self.ledger.checkpoint(at: self.clock()); self.status = .recording
+                    self.finishRecognition(.unchanged); self.persist(); return
                 }
+                self.activeDiagnostic?.stage = .classification
                 let started = self.clock()
                 let result = try await self.analyze(frame.jpeg, settings, key)
                 self.reconcile()
                 guard self.revision == token, self.foreground() == app, self.permission(), self.sessionAvailable(), !Task.isCancelled else { return }
                 self.lastRecognitionDuration = self.clock().timeIntervalSince(started)
-                if self.lastFrameKey != frame.contextKey { self.override = nil }
-                let classification = self.override?.key == frame.contextKey ? self.override!.value : result
-                if self.lastFrameKey == frame.contextKey, let current = self.ledger.current,
-                   current.bundleID == app.bundleID, current.category == classification.category {
+                let classification = result
+                let reason: ActivityUnknownReason? = classification.category == .unknown ? .insufficientEvidence : nil
+                if self.ledger.resolveShortWait(classification, capturedAt: frame.capturedAt, sameWindow: self.pendingWindowID != nil && self.pendingWindowID == frame.windowID && self.foregroundWindowID(app) == frame.windowID) {
+                    // The result only absorbs a <=5s wait observed in this same live window.
+                } else if self.lastFrameKey == frame.contextKey, let current = self.ledger.current,
+                   current.bundleID == app.bundleID, current.category == classification.category, current.unknownReason == reason {
                     self.ledger.checkpoint(at: frame.capturedAt)
                     if let continuing = self.ledger.current { self.ledger.describe(id: continuing.id, title: classification.title) }
-                    else { self.ledger.begin(classification, app: app.name, bundleID: app.bundleID, at: frame.capturedAt) }
-                } else { self.ledger.begin(classification, app: app.name, bundleID: app.bundleID, at: frame.capturedAt) }
+                    else { self.ledger.begin(classification, app: app.name, bundleID: app.bundleID, at: frame.capturedAt, unknownReason: reason) }
+                } else { self.ledger.begin(classification, app: app.name, bundleID: app.bundleID, at: frame.capturedAt, unknownReason: reason) }
                 self.ledger.checkpoint(at: self.clock())
-                self.lastFrameKey = frame.contextKey; self.lastFingerprint = frame.fingerprint; self.lastInputApp = app.bundleID
+                self.pendingWindowID = nil; self.consecutiveFailures = 0
+                self.lastFrameKey = frame.contextKey; self.lastFingerprint = frame.fingerprint
                 self.lastIdentified = frame.capturedAt
                 self.status = classification.category == .unknown ? .uncertain : .recording
-                self.updateReminder()
+                self.finishRecognition(.success, code: classification.category == .unknown ? "insufficient_evidence" : nil)
                 self.persist()
             } catch {
                 self.reconcile()
                 guard self.revision == token, !Task.isCancelled else { return }
-                self.ledger.begin(ActivityClassification(category: .unknown, title: "识别未完成，可补充分类"), app: app.name, bundleID: app.bundleID, at: sampledAt)
+                self.pendingWindowID = nil; self.consecutiveFailures += 1
+                self.finishRecognition(.failure, code: RecognitionDiagnostic.errorCode(error))
+                self.ledger.begin(ActivityClassification(category: .unknown, title: "识别未完成，保留为未识别"), app: app.name, bundleID: app.bundleID, at: sampledAt, unknownReason: .failure)
                 self.ledger.checkpoint(at: self.clock())
                 self.status = .error(error.localizedDescription)
                 self.lastFingerprint = nil; self.persist()

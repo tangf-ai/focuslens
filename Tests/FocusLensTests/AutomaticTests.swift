@@ -38,6 +38,34 @@ extension FocusLensTests {
         XCTAssertNil(config.workBackground); XCTAssertNil(config.classificationRules)
     }
 
+    @MainActor func testGuidanceAutosaveWithoutModelAndSettingsIsolation() throws {
+        let directory = automaticDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let tracker = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 })
+        defer { tracker.shutdown() }
+        let original = tracker.config
+        XCTAssertTrue(tracker.saveGuidance(workBackground: "  软件开发\n", classificationRules: String(repeating: "规", count: 2100)))
+        var expected = original
+        expected.workBackground = "软件开发"; expected.classificationRules = String(repeating: "规", count: AutomaticConfig.rulesLimit)
+        XCTAssertEqual(tracker.config, expected)
+        let file = directory.appendingPathComponent("automatic-settings.json")
+        XCTAssertEqual(try JSONDecoder().decode(AutomaticConfig.self, from: Data(contentsOf: file)), expected)
+        let restored = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 })
+        XCTAssertEqual(restored.config, expected)
+        XCTAssertTrue(tracker.saveGuidance(workBackground: " \n", classificationRules: nil))
+        XCTAssertEqual(tracker.config, original)
+        XCTAssertEqual(try JSONDecoder().decode(AutomaticConfig.self, from: Data(contentsOf: file)), original)
+
+        // A failed write must never be reported as a successful autosave.
+        let blockedDirectory = automaticDirectory(); defer { try? FileManager.default.removeItem(at: blockedDirectory) }
+        let blocked = AutomaticTracker(directory: blockedDirectory, startClock: false, idleSeconds: { 0 })
+        try FileManager.default.createDirectory(at: blockedDirectory.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("not a directory".utf8).write(to: blockedDirectory)
+        XCTAssertFalse(blocked.saveGuidance(workBackground: "无法保存", classificationRules: nil))
+        XCTAssertNotNil(blocked.errorMessage)
+        XCTAssertFalse(blocked.config.enabled)
+        XCTAssertFalse(blocked.saveGuidance(workBackground: "无法保存", classificationRules: nil))
+    }
+
     @MainActor func testGuidanceSaveInvalidatesImageCacheAndCancelsOldResult() async throws {
         let directory = automaticDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
         var config = AutomaticConfig(); config.ai = AISettings(baseURL: "http://127.0.0.1/v1", model: "vision")
@@ -59,21 +87,23 @@ extension FocusLensTests {
         tracker.sample(); try await Task.sleep(for: .milliseconds(40))
         XCTAssertEqual(received.count, 1) // Unchanged image is skipped initially.
         let history = tracker.ledger.segments
-        var draft = tracker.config; draft.workBackground = "  软件开发  "; draft.classificationRules = "AI 排错归开发"
-        XCTAssertTrue(tracker.saveConfig(draft, newKey: nil))
+        XCTAssertTrue(tracker.saveGuidance(workBackground: "  软件开发  ", classificationRules: "AI 排错归开发"))
         XCTAssertTrue(tracker.config.enabled); XCTAssertTrue(tracker.verified)
         XCTAssertEqual(tracker.config.consentSignature, config.consentSignature)
         tracker.sample(); try await Task.sleep(for: .milliseconds(20))
         XCTAssertEqual(received.count, 2)
         XCTAssertEqual(received.last?.workBackground, "软件开发")
         // Change instructions while the previous request is still in flight.
-        draft = tracker.config; draft.classificationRules = nil
-        XCTAssertTrue(tracker.saveConfig(draft, newKey: nil))
+        XCTAssertTrue(tracker.saveGuidance(workBackground: tracker.config.workBackground, classificationRules: nil))
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertFalse(tracker.ledger.segments.contains { $0.category == .development })
         tracker.sample(); try await Task.sleep(for: .milliseconds(160))
         XCTAssertEqual(received.count, 3); XCTAssertNil(received.last?.classificationRules)
         XCTAssertEqual(tracker.current?.category, .reading)
+        // Repeated mouse-exit/focus-loss events must not invalidate the image cache.
+        XCTAssertTrue(tracker.saveGuidance(workBackground: " 软件开发 ", classificationRules: "\n"))
+        tracker.sample(); try await Task.sleep(for: .milliseconds(120))
+        XCTAssertEqual(received.count, 3)
         for segment in history { XCTAssertEqual(tracker.ledger.segments.first { $0.id == segment.id }?.category, segment.category) }
         let restored = AutomaticTracker(directory: directory, startClock: false, idleSeconds: { 0 })
         XCTAssertEqual(restored.config.workBackground, "软件开发"); XCTAssertNil(restored.config.classificationRules)
@@ -176,12 +206,11 @@ extension FocusLensTests {
         ledger.checkpoint(at: start.addingTimeInterval(120), calendar: calendar)
         XCTAssertEqual(ledger.segments.count, 2)
         XCTAssertEqual(ledger.segments.map(\.seconds), [60,60])
-        let previous = try XCTUnwrap(ledger.current)
-        ledger.correct(id: previous.id, category: .writing, title: "笔记")
         ledger.checkpoint(at: start.addingTimeInterval(150), calendar: calendar)
-        ledger.restoreClassification(previous)
         XCTAssertEqual(ledger.current?.category, .reading)
         XCTAssertEqual(ledger.current?.seconds, 90)
+        var legacy = try XCTUnwrap(ledger.current); legacy.corrected = true; legacy.category = .writing
+        XCTAssertEqual(try JSONDecoder().decode(ActivitySegment.self, from: JSONEncoder().encode(legacy)), legacy)
     }
 
     func testVisionParsingAndTextOnlyRejection() throws {
@@ -264,9 +293,7 @@ extension FocusLensTests {
         try await Task.sleep(for: .milliseconds(140))
         XCTAssertEqual(tracker.status, .away)
         XCTAssertNil(tracker.current)
-        tracker.setAway(false); tracker.setManualBlocked(true); tracker.sample()
-        XCTAssertEqual(tracker.status, .manual)
-        tracker.setManualBlocked(false)
+        tracker.setAway(false)
         tracker.setLifecycleBlock("lock", blocked: true)
         tracker.setLifecycleBlock("screen", blocked: true)
         tracker.setLifecycleBlock("screen", blocked: false)
@@ -304,14 +331,10 @@ extension FocusLensTests {
         let formatter = DateFormatter(); formatter.timeZone = TimeZone(secondsFromGMT: 0); formatter.dateFormat = "yyyy-MM-dd"
         let file = directory.appendingPathComponent("automatic-activities/" + formatter.string(from: old) + ".json")
         try JSONEncoder().encode([first,second]).write(to: file)
-        tracker.editingSegment = first; tracker.correct(id: first.id, category: .writing, title: "corrected")
         tracker.persist()
-        let items = try JSONDecoder().decode([ActivitySegment].self, from: Data(contentsOf: file))
-        XCTAssertEqual(items.count, 2); XCTAssertEqual(items[1], second)
-        XCTAssertEqual(items[0].category, .writing)
-        tracker.undoCorrection()
-        let undone = try JSONDecoder().decode([ActivitySegment].self, from: Data(contentsOf: file))
-        XCTAssertEqual(undone, [first,second])
+        let items = try tracker.allSegments()
+        XCTAssertTrue(items.contains(first)); XCTAssertTrue(items.contains(second))
+        XCTAssertEqual(try JSONDecoder().decode([ActivitySegment].self, from: Data(contentsOf: file)), [first, second])
     }
 
     func testAutomaticReviewNeverInventsCompletion() throws {

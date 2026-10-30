@@ -15,7 +15,7 @@ struct ForegroundContext: Equatable {
 }
 
 struct MemoryScreenCapture {
-    struct Frame { var jpeg: Data; var fingerprint: Data; var contextKey: String; var capturedAt: Date }
+    struct Frame { var jpeg: Data; var fingerprint: Data; var contextKey: String; var capturedAt: Date; var windowID: CGWindowID? = nil }
     static var allowed: Bool { CGPreflightScreenCaptureAccess() }
     static var sessionAvailable: Bool {
         guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
@@ -29,6 +29,11 @@ struct MemoryScreenCapture {
         var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
         guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return [] }
         return displays.prefix(Int(count)).map { CGDisplayBounds($0) }
+    }
+
+    static func currentWindowID(_ app: ForegroundContext) -> CGWindowID? {
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        return frontWindowID(in: windows, pid: app.pid, displayBounds: connectedDisplayBounds())
     }
 
     /// CGWindowList is ordered front to back across every display, in Quartz coordinates.
@@ -87,7 +92,7 @@ struct MemoryScreenCapture {
             }
             let key = "\(app.pid):\(number):\(window.title ?? "")"
             let contextKey = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
-            return Frame(jpeg: jpeg, fingerprint: Data(pixels), contextKey: contextKey, capturedAt: Date())
+            return Frame(jpeg: jpeg, fingerprint: Data(pixels), contextKey: contextKey, capturedAt: Date(), windowID: number)
         }
     }
 }

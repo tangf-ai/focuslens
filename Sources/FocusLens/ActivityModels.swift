@@ -4,6 +4,8 @@ enum ActivityCategory: String, Codable, CaseIterable, Identifiable {
     case reading = "阅读", writing = "写作", development = "开发", communication = "沟通"
     case video = "视频", other = "其他", unknown = "待确认"
     var id: String { rawValue }
+    // Keep the original raw value readable in historical JSON and model responses.
+    var displayName: String { self == .unknown ? "未识别" : rawValue }
 }
 
 struct ActivitySegment: Codable, Identifiable, Equatable {
@@ -15,7 +17,31 @@ struct ActivitySegment: Codable, Identifiable, Equatable {
     var app: String
     var bundleID: String
     var corrected = false
+    var unknownReason: ActivityUnknownReason?
     var seconds: TimeInterval { max(0, end.timeIntervalSince(start)) }
+    var unresolvedReason: ActivityUnknownReason? {
+        guard category == .unknown else { return nil }
+        if let unknownReason { return unknownReason }
+        // Historical titles are only used for display; saved evidence is never rewritten.
+        guard !corrected else { return .legacy }
+        if title == "等待识别当前活动" || title.hasSuffix(" · 活动待确认") || title.hasSuffix(" · 活动未识别") { return .waiting }
+        if ["识别未完成，可补充分类", "识别未完成，保留为未识别", "识别持续不稳定，活动待确认"].contains(title) { return .failure }
+        return .legacy
+    }
+    var categoryLabel: String { unresolvedReason?.label ?? category.displayName }
+}
+
+enum ActivityUnknownReason: String, Codable, CaseIterable, Identifiable {
+    case waiting, failure, insufficientEvidence, legacy
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .waiting: "等待识别"
+        case .failure: "识别异常"
+        case .insufficientEvidence: "证据不足"
+        case .legacy: "历史未识别"
+        }
+    }
 }
 
 struct AutomaticConfig: Codable, Equatable {
@@ -60,8 +86,11 @@ struct AutomaticConfig: Codable, Equatable {
         let spacing = appChanged ? min(5, intervalSeconds) : intervalSeconds
         return max(appChanged ? 1.5 : 0.2, elapsed.map { Double(spacing) - max(0, $0) } ?? 0)
     }
+    func retryDelay(failures: Int) -> TimeInterval {
+        min(Double(intervalSeconds), min(60, 5 * pow(2, Double(max(0, min(4, failures - 1))))))
+    }
     var reminderMinutes = 25
-    var reminders = true
+    var reminders = false
     var enabled = false
     var pausedByUser = false
     var snoozeUntil: Date?
@@ -100,13 +129,29 @@ struct ActivityLedger {
         } else { segments[index].end = date }
     }
 
-    mutating func begin(_ classification: ActivityClassification, app: String, bundleID: String, at date: Date) {
+    mutating func begin(_ classification: ActivityClassification, app: String, bundleID: String, at date: Date, unknownReason: ActivityUnknownReason? = nil) {
         checkpoint(at: date)
+        let reason = classification.category == .unknown ? unknownReason : nil
         if let current, current.bundleID == bundleID,
-           current.category == classification.category && current.title == classification.title { return }
+           current.category == classification.category && current.title == classification.title && current.unknownReason == reason { return }
         let segment = ActivitySegment(start: date, end: date, category: classification.category,
-                                      title: classification.title, app: app, bundleID: bundleID)
+                                      title: classification.title, app: app, bundleID: bundleID, unknownReason: reason)
         segments.append(segment); currentID = segment.id
+    }
+
+    /// Only a fresh, same-window observation may absorb its short initial debounce.
+    mutating func resolveShortWait(_ classification: ActivityClassification, capturedAt: Date, sameWindow: Bool, calendar: Calendar = .current) -> Bool {
+        guard sameWindow, classification.category != .unknown,
+              let index = segments.firstIndex(where: { $0.id == currentID }),
+              segments[index].category == .unknown, segments[index].unknownReason == .waiting,
+              !segments[index].corrected,
+              capturedAt >= segments[index].start, capturedAt.timeIntervalSince(segments[index].start) <= 5,
+              calendar.isDate(capturedAt, inSameDayAs: segments[index].start) else { return false }
+        segments[index].category = classification.category
+        segments[index].title = classification.title
+        segments[index].unknownReason = nil
+        checkpoint(at: capturedAt)
+        return true
     }
 
     mutating func stop(at date: Date) { checkpoint(at: date); currentID = nil }
@@ -118,38 +163,27 @@ struct ActivityLedger {
         stop(at: date)
     }
 
-    mutating func correct(id: UUID, category: ActivityCategory, title: String) {
-        guard let index = segments.firstIndex(where: { $0.id == id }) else { return }
-        segments[index].category = category
-        segments[index].title = String(title.trimmingCharacters(in: .whitespacesAndNewlines).prefix(100))
-        segments[index].corrected = true
-    }
     mutating func describe(id: UUID, title: String) {
         guard let index = segments.firstIndex(where: { $0.id == id }), !segments[index].corrected else { return }
         segments[index].title = String(title.prefix(100))
     }
-    mutating func restoreClassification(_ previous: ActivitySegment) {
-        guard let index = segments.firstIndex(where: { $0.id == previous.id }) else { return }
-        segments[index].category = previous.category; segments[index].title = previous.title; segments[index].corrected = previous.corrected
-    }
+
 }
 
 enum AutomaticStatus: Equatable {
-    case off, paused, away, inactive, manual, excluded(String), waiting, recognizing, recording, uncertain, error(String), resting(Date)
+    case off, paused, away, inactive, excluded(String), waiting, recognizing, recording, uncertain, error(String)
     var label: String {
         switch self {
         case .off: "自动记录未启用"
         case .paused: "记录已暂停"
         case .away: "已离开电脑"
         case .inactive: "可能已离开"
-        case .manual: "手动计时期间暂挂"
         case .excluded: "此应用不记录"
         case .waiting: "等待更新"
         case .recognizing: "识别中"
         case .recording: "自动记录中"
-        case .uncertain: "活动待确认"
+        case .uncertain: "当前活动未识别"
         case .error: "识别暂不可用"
-        case .resting: "休息中"
         }
     }
     var detail: String {
@@ -157,15 +191,13 @@ enum AutomaticStatus: Equatable {
         case .off: "配置视觉模型、授权并确认后开启。"
         case .paused: "暂停期间不截图、不分析、不累计。"
         case .away: "锁屏或睡眠期间不记录，回来后重新识别。"
-        case .inactive: "持续无操作，已暂停累计与截图；恢复键鼠操作后自动继续，可确认刚才的空闲时段。"
-        case .manual: "保留手动计时，避免重复记录。"
+        case .inactive: "持续无操作，已暂停累计与截图；恢复操作后自动继续，空闲时段不补记。"
         case .excluded(let name): "正在使用\(name)，离开后恢复识别。"
         case .waiting: "当前窗口等待下一次采样，尚未发送识别请求。"
         case .recognizing: "等待新结果；显示的时间为自动估算。"
         case .recording: "根据间隔采样估算，不代表实际专注程度。"
-        case .uncertain: "先保留时间，可以手动修正分类。"
+        case .uncertain: "证据不足，保留为未识别，不推测具体活动，也无需补填。"
         case .error(let message): message
-        case .resting: "休息结束后恢复识别，也可提前恢复。"
         }
     }
 }
@@ -177,7 +209,7 @@ enum AutomaticError: LocalizedError {
         case .permission: "需要允许专注镜的屏幕录制权限。"
         case .noWindow: "没有可识别的前台窗口，当前时段暂不分类。"
         case .imageTooLarge: "图片未能压缩到内存预算内，已跳过本次识别。"
-        case .invalidResponse: "视觉服务没有返回有效分类，当前时间保留为待确认。"
+        case .invalidResponse: "视觉服务没有返回有效分类，当前时间保留为未识别。"
         case .capability: "图片理解测试未通过，请检查服务是否支持图片输入。"
         case .missingModel: "请先填写视觉模型的接口地址和模型名称。"
         case .notVerified: "请先通过当前配置的图片理解测试。"

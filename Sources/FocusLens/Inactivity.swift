@@ -42,13 +42,6 @@ struct InactivityPeriod: Codable, Equatable, Identifiable {
     var restoredSegments: [ActivitySegment] = []
     var applied: Bool?
     var seconds: TimeInterval { max(0, (end ?? observedThrough).timeIntervalSince(start)) }
-    var presentLabel: String {
-        switch category {
-        case .reading: "刚才仍在阅读"
-        case .video: "刚才仍在看视频"
-        default: "刚才仍在专注"
-        }
-    }
     func segmentsForConfirmation() -> [ActivitySegment] {
         guard let end, end > start else { return [] }
         var result: [ActivitySegment] = [], cursor = start
