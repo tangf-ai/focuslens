@@ -43,4 +43,8 @@ swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Tests/FocusLensTests/AutomaticOnlyTests.swift" \
     "$PROJECT_DIR/Tests/FocusLensTests/CheckRunner.swift" \
     -o "$CHECK_DIR/checks"
-"$CHECK_DIR/checks"
+"$CHECK_DIR/checks" | tee "$CHECK_DIR/results"
+if ! grep -q '项检查，0 个失败$' "$CHECK_DIR/results"; then
+    print -u2 "检查进程未输出完整通过结果。"
+    exit 1
+fi

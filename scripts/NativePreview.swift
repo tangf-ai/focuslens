@@ -60,9 +60,26 @@ import SwiftUI
         let floating = FocusFloatingContent(); floating.apply(appearance: store.appearance, active: true)
         floating.status.stringValue = "自动记录 · 开发"; floating.title.stringValue = "调整活动识别逻辑"
         floating.detail.stringValue = "代码编辑器 · 最近识别于 14:36"; floating.time.stringValue = "约 42 分钟"
+        floating.category.stringValue = "开发"; floating.compactTime.stringValue = "约 42 分钟"
         floating.daily.stringValue = "今天开发 · 约 2 小时 08 分"
         floating.frame = NSRect(origin:.zero,size:floating.desiredSize); floating.layoutSubtreeIfNeeded()
         try save(floating, to: output.appendingPathComponent("floating.png"))
+        for (name, mode) in [("floating-expanded", FloatingDisplayMode.expanded), ("floating-docked", .docked)] {
+            floating.mode = mode
+            floating.frame = NSRect(origin: .zero, size: floating.desiredSize); floating.layoutSubtreeIfNeeded()
+            try save(floating, to: output.appendingPathComponent(name + ".png"))
+        }
+        store.appearance.update { $0.width = 250; $0.theme = .night }
+        floating.apply(appearance: store.appearance, active: false)
+        floating.status.stringValue = "可能已离开"; floating.title.stringValue = "无操作，计时已暂停"
+        floating.category.stringValue = "已空闲"
+        floating.detail.stringValue = "恢复操作自动继续 · 空闲时段不补记"; floating.daily.stringValue = ""
+        floating.mode = .compact
+        floating.frame = NSRect(origin: .zero, size: floating.desiredSize); floating.layoutSubtreeIfNeeded()
+        try save(floating, to: output.appendingPathComponent("floating-inactive-dark.png"))
+        floating.mode = .expanded
+        floating.frame = NSRect(origin: .zero, size: floating.desiredSize); floating.layoutSubtreeIfNeeded()
+        try save(floating, to: output.appendingPathComponent("floating-expanded-dark.png"))
         summary.shutdown(); tracker.shutdown()
     }
     @MainActor static func save(_ view: NSView, to url: URL) throws {

@@ -14,9 +14,6 @@ struct AppearanceWorkspace: View {
 
 struct AppearanceSettings: View {
     let appearance: AppearanceStore
-    private func binding<Value>(_ key: WritableKeyPath<AppearancePreferences, Value>) -> Binding<Value> {
-        Binding(get: { appearance.preferences[keyPath: key] }, set: { value in appearance.update { $0[keyPath: key] = value } })
-    }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Label("主题", systemImage: "palette").font(.system(size: 15, weight: .semibold))
@@ -47,14 +44,8 @@ struct AppearanceSettings: View {
                 }
             }
             Divider().overlay(Theme.line)
-            Text("主窗口和轻量活动浮窗同步切换主题；浮窗不再使用圆环、倒计时或装饰动画。")
+            Text("主窗口和悬浮胶囊同步切换主题。胶囊常驻 148 × 32 点，停留展开，移开收起；可拖动，贴边缩成小把手。")
                 .font(.system(size: 11)).foregroundStyle(Theme.muted).lineSpacing(4)
-            DisclosureGroup("大小与圆角") {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack { Text("宽度 \(Int(appearance.preferences.width)) 点"); Slider(value: binding(\.width), in: 290...360, step: 2) }
-                    HStack { Text("圆角 \(Int(appearance.preferences.radius)) 点"); Slider(value: binding(\.radius), in: 16...36, step: 1) }
-                }.font(.system(size: 12)).padding(.top, 10)
-            }.frame(maxWidth: 460)
             if let error = appearance.errorMessage { Text(error).font(.system(size: 12)).foregroundStyle(Theme.accent) }
             else { Label("外观已自动保存", systemImage: "checkmark").font(.system(size: 11)).foregroundStyle(Theme.muted) }
         }.foregroundStyle(Theme.ink)

@@ -377,7 +377,7 @@ final class AutomaticTracker: ObservableObject {
         ledger.stop(at: date); storedDisplay = ledger.segments.max { $0.end < $1.end }
         if config.enabled { persist() }
     }
-    func shutdown() { finishInactivity(at: clock()); inactivityTimer?.invalidate(); cancelWork(); testTask?.cancel() }
+    func shutdown() { finishInactivity(at: clock()); inactivityTimer?.invalidate(); cancelWork(); testTask?.cancel(); floating?.shutdown(); floating = nil }
 
     private func inactivityBoundary(at date: Date, category: ActivityCategory) -> Date? {
         guard let timeout = config.inactivitySettings.timeout(for: category) else { return nil }
